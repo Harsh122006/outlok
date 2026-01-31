@@ -2,46 +2,55 @@ import os
 import asyncio
 from fastapi import FastAPI, Request
 from telegram import Update
-from telegram.ext import Application, CommandHandler, ContextTypes
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    ContextTypes,
+)
 
-# -------- ENV --------
-BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
-WEBHOOK_URL = os.environ["WEBHOOK_URL"]  # https://xxx.up.railway.app
+TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
+WEBHOOK_URL = os.environ["WEBHOOK_URL"]  # https://xxxx.up.railway.app
 
-# -------- APP --------
 app = FastAPI()
-tg_app = Application.builder().token(BOT_TOKEN).build()
+telegram_app: Application | None = None
 
-# -------- BOT COMMANDS --------
+
+# -------- Telegram handlers --------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "👋 Bot is alive.\nUse /connect next."
+        "👋 Bot is alive!\n\nSend /start again anytime."
     )
 
-async def connect(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "🔐 OAuth will be added here."
-    )
 
-tg_app.add_handler(CommandHandler("start", start))
-tg_app.add_handler(CommandHandler("connect", connect))
-
-# -------- STARTUP --------
+# -------- FastAPI startup --------
 @app.on_event("startup")
-async def startup():
-    await tg_app.initialize()
-    await tg_app.bot.set_webhook(f"{WEBHOOK_URL}/webhook")
+async def on_startup():
+    global telegram_app
+
+    telegram_app = Application.builder().token(TOKEN).build()
+    telegram_app.add_handler(CommandHandler("start", start))
+
+    await telegram_app.initialize()
+    await telegram_app.bot.set_webhook(f"{WEBHOOK_URL}/webhook")
     print("✅ Webhook set")
 
-# -------- WEBHOOK --------
+
+# -------- Telegram webhook --------
 @app.post("/webhook")
 async def telegram_webhook(request: Request):
     data = await request.json()
-    update = Update.de_json(data, tg_app.bot)
-    await tg_app.process_update(update)
+    update = Update.de_json(data, telegram_app.bot)
+    await telegram_app.process_update(update)
     return {"ok": True}
 
-# -------- HEALTH --------
+
+# -------- Health check --------
 @app.get("/")
 def health():
     return {"status": "ok"}
+
+
+# -------- Local run (Railway uses this) --------
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8080)
