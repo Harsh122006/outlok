@@ -1,24 +1,47 @@
 import os
-import threading
-import uvicorn
+import asyncio
+from fastapi import FastAPI, Request
+from telegram import Update
+from telegram.ext import Application, CommandHandler, ContextTypes
 
-from health import app as health_app
-from telegram_bot import run_bot
+# -------- ENV --------
+BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
+WEBHOOK_URL = os.environ["WEBHOOK_URL"]  # https://xxx.up.railway.app
 
+# -------- APP --------
+app = FastAPI()
+tg_app = Application.builder().token(BOT_TOKEN).build()
 
-def start_health_server():
-    port = int(os.environ.get("PORT", 8080))
-    uvicorn.run(
-        health_app,
-        host="0.0.0.0",
-        port=port,
-        log_level="info"
+# -------- BOT COMMANDS --------
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "👋 Bot is alive.\nUse /connect next."
     )
 
+async def connect(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "🔐 OAuth will be added here."
+    )
 
-if __name__ == "__main__":
-    # Start Telegram bot in background
-    threading.Thread(target=run_bot, daemon=True).start()
+tg_app.add_handler(CommandHandler("start", start))
+tg_app.add_handler(CommandHandler("connect", connect))
 
-    # Start HTTP server (Railway needs this)
-    start_health_server()
+# -------- STARTUP --------
+@app.on_event("startup")
+async def startup():
+    await tg_app.initialize()
+    await tg_app.bot.set_webhook(f"{WEBHOOK_URL}/webhook")
+    print("✅ Webhook set")
+
+# -------- WEBHOOK --------
+@app.post("/webhook")
+async def telegram_webhook(request: Request):
+    data = await request.json()
+    update = Update.de_json(data, tg_app.bot)
+    await tg_app.process_update(update)
+    return {"ok": True}
+
+# -------- HEALTH --------
+@app.get("/")
+def health():
+    return {"status": "ok"}
