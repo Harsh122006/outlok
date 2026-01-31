@@ -2,6 +2,7 @@ import os
 import json
 import asyncio
 from datetime import datetime, timedelta
+from fastapi.responses import HTMLResponse  # Add this import
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import RedirectResponse
 from telegram import Update, Bot
