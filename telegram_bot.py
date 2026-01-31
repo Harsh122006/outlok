@@ -28,7 +28,7 @@ async def connect(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 def run_bot():
-    # 🔑 CREATE EVENT LOOP FOR THIS THREAD
+    # Create event loop for this thread
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
 
@@ -37,4 +37,9 @@ def run_bot():
     app.add_handler(CommandHandler("connect", connect))
 
     print("🤖 Telegram bot started")
-    app.run_polling()
+
+    # 🔥 IMPORTANT: disable signal handlers
+    app.run_polling(
+        close_loop=False,
+        stop_signals=None
+    )
