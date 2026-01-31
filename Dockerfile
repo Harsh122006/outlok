@@ -1,10 +1,10 @@
 FROM python:3.10-slim
 
-WORKDIR /app/outlok
+WORKDIR /app
 
-COPY requirements.txt /app/
-RUN pip install --no-cache-dir -r /app/requirements.txt
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
 
-COPY . /app
+COPY app.py .
 
 CMD ["python", "app.py"]
