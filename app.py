@@ -1,7 +1,9 @@
 import os
+import threading
 import requests
 from fastapi import FastAPI, Request
-from fastapi.responses import RedirectResponse, PlainTextResponse
+from fastapi.responses import PlainTextResponse
+import telegram_bot  # 👈 import bot runner
 
 app = FastAPI()
 
@@ -28,7 +30,7 @@ async def auth_callback(request: Request):
         "code": code,
         "redirect_uri": REDIRECT_URI,
         "grant_type": "authorization_code",
-        "scope": "https://graph.microsoft.com/.default",
+        "scope": "offline_access Mail.Read",
     }
 
     token = requests.post(TOKEN_URL, data=data).json()
@@ -36,5 +38,12 @@ async def auth_callback(request: Request):
     if "access_token" not in token:
         return PlainTextResponse(f"Token error: {token}")
 
-    # 🔐 Here you would store token in DB (per Telegram user)
-    return PlainTextResponse("✅ Outlook connected successfully! You can return to Telegram.")
+    return PlainTextResponse(
+        "✅ Outlook connected successfully! You can return to Telegram."
+    )
+
+def start_bot():
+    telegram_bot.run_bot()
+
+# 🚀 Start Telegram bot in background
+threading.Thread(target=start_bot, daemon=True).start()
