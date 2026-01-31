@@ -1,7 +1,6 @@
 import asyncio
-import threading
 from flask import Flask
-from telegram_bot import build_bot
+from telegram_bot import create_application
 
 app = Flask(__name__)
 
@@ -9,10 +8,17 @@ app = Flask(__name__)
 def health():
     return "OK", 200
 
-def run_bot():
-    bot = build_bot()
-    asyncio.run(bot.run_polling())
+async def main():
+    telegram_app = create_application()
+    await telegram_app.initialize()
+    await telegram_app.start()
+    await telegram_app.bot.initialize()
+    await telegram_app.updater.start_polling()
+
+    # Keep running forever
+    while True:
+        await asyncio.sleep(3600)
 
 if __name__ == "__main__":
-    threading.Thread(target=run_bot).start()
+    asyncio.get_event_loop().create_task(main())
     app.run(host="0.0.0.0", port=8080)
