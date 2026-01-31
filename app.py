@@ -1,15 +1,18 @@
 import asyncio
-from fastapi import FastAPI
-from telegram_bot import start_bot
+import threading
+from flask import Flask
+from telegram_bot import build_bot
 
-app = FastAPI()
+app = Flask(__name__)
 
-@app.on_event("startup")
-async def startup():
-    print("🚀 App startup")
-    asyncio.create_task(start_bot())  # run telegram bot in background
-    print("🤖 Telegram bot started")
+@app.route("/")
+def health():
+    return "OK", 200
 
-@app.get("/")
-async def root():
-    return {"status": "ok"}
+def run_bot():
+    bot = build_bot()
+    asyncio.run(bot.run_polling())
+
+if __name__ == "__main__":
+    threading.Thread(target=run_bot).start()
+    app.run(host="0.0.0.0", port=8080)
