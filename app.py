@@ -1,9 +1,10 @@
 import os
 import threading
 import requests
+import uvicorn
 from fastapi import FastAPI, Request
 from fastapi.responses import PlainTextResponse
-import telegram_bot  # 👈 import bot runner
+import telegram_bot
 
 app = FastAPI()
 
@@ -14,9 +15,11 @@ TENANT = os.getenv("MS_TENANT_ID", "common")
 
 TOKEN_URL = f"https://login.microsoftonline.com/{TENANT}/oauth2/v2.0/token"
 
+
 @app.get("/")
 def home():
     return {"status": "running"}
+
 
 @app.get("/auth/callback")
 async def auth_callback(request: Request):
@@ -42,8 +45,15 @@ async def auth_callback(request: Request):
         "✅ Outlook connected successfully! You can return to Telegram."
     )
 
-def start_bot():
+
+def start_telegram_bot():
+    print("🤖 Starting Telegram bot...")
     telegram_bot.run_bot()
 
-# 🚀 Start Telegram bot in background
-threading.Thread(target=start_bot, daemon=True).start()
+
+if __name__ == "__main__":
+    # 🔥 Start Telegram bot in background
+    threading.Thread(target=start_telegram_bot, daemon=True).start()
+
+    # 🚀 Start FastAPI server (THIS KEEPS CONTAINER ALIVE)
+    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 8080)))
