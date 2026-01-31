@@ -1,31 +1,54 @@
 #!/usr/bin/env python3
 """
-Railway-ready version with health check endpoint
+Railway-ready Telegram bot with optional health check
 """
 
+import os
 import asyncio
 import threading
-from health import app as health_app
+from telegram.ext import Application
 from bot import OutlookEmailWatcherBot
+from health import app as health_app
+
 
 def run_health_check():
-    """Run Flask health check server in separate thread"""
-    health_app.run(host='0.0.0.0', port=8080, debug=False, use_reloader=False)
+    """Run Flask health check server"""
+    health_app.run(
+        host="0.0.0.0",
+        port=int(os.getenv("PORT", 8080)),
+        debug=False,
+        use_reloader=False,
+    )
 
-async def main():
-    """Main function with health check"""
-    # Start health check server in background thread
-    health_thread = threading.Thread(target=run_health_check, daemon=True)
-    health_thread.start()
-    
-    # Start Telegram bot
+
+async def post_init(application: Application):
+    """
+    Runs AFTER the Telegram event loop is ready.
+    Start background tasks here if needed.
+    """
+    # If your OutlookEmailWatcherBot starts background jobs,
+    # they should be started here.
+    pass
+
+
+def main():
+    # Start health check in background (optional)
+    threading.Thread(target=run_health_check, daemon=True).start()
+
+    # Create your bot
     bot = OutlookEmailWatcherBot()
-    await bot.application.initialize()
-    await bot.application.start()
-    await bot.application.updater.start_polling()
-    
-    # Keep running
-    await asyncio.Event().wait()
 
-if __name__ == '__main__':
-    asyncio.run(main())
+    # Attach post-init hook
+    bot.application.post_init = post_init
+
+    print("Bot running on Railway...")
+
+    # This blocks forever (correct)
+    bot.application.run_polling(
+        allowed_updates=None,
+        close_loop=False
+    )
+
+
+if __name__ == "__main__":
+    main()
