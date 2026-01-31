@@ -1,21 +1,31 @@
-import os
 import threading
-from flask import Flask, jsonify
-from telegram_bot import start_bot
+import asyncio
+from flask import Flask
+from telegram_bot import run_telegram_bot
 
+# Flask app (for Railway health check + OAuth callback)
 app = Flask(__name__)
 
 @app.route("/")
 def home():
-    return jsonify({"status": "ok"}), 200
+    return "OK", 200
 
-def run_telegram():
-    start_bot()
+@app.route("/auth/callback")
+def auth_callback():
+    return "You can close this window. Authentication successful.", 200
+
+
+def run_flask():
+    # Railway exposes PORT automatically
+    import os
+    port = int(os.environ.get("PORT", 8080))
+    app.run(host="0.0.0.0", port=port, debug=False)
+
 
 if __name__ == "__main__":
-    # Start Telegram bot in background
-    threading.Thread(target=run_telegram, daemon=True).start()
+    # 1️⃣ Start Flask in BACKGROUND
+    flask_thread = threading.Thread(target=run_flask, daemon=True)
+    flask_thread.start()
 
-    # Start Flask for Railway healthcheck
-    port = int(os.environ.get("PORT", 8080))
-    app.run(host="0.0.0.0", port=port)
+    # 2️⃣ Run Telegram bot in MAIN thread (IMPORTANT)
+    asyncio.run(run_telegram_bot())
