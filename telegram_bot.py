@@ -1,10 +1,6 @@
 import os
 from telegram import Update
-from telegram.ext import (
-    ApplicationBuilder,
-    CommandHandler,
-    ContextTypes,
-)
+from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
 BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 
@@ -33,11 +29,11 @@ async def connect(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-async def run_telegram_bot():
+def start_telegram_bot():
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("connect", connect))
 
     print("✅ Telegram bot started")
-    await app.run_polling()
+    app.run_polling()   # ← IMPORTANT: no asyncio here
