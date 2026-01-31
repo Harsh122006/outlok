@@ -1,429 +1,470 @@
 #!/usr/bin/env python3
 """
-Outlook Email to Telegram Notifier Bot
-Deployed on Railway with IMAP protocol
+Interactive Outlook Email Watcher Telegram Bot
+Users can register their credentials through the bot
 """
 
 import os
-import imaplib
-import email
-import time
-import json
 import logging
-import smtplib
-from email.header import decode_header
-from email.mime.text import MIMEText
-from datetime import datetime
-import re
 import sys
-import requests
-from typing import Optional, Dict, List, Tuple
+import asyncio
+from datetime import datetime
+from typing import Dict, Optional
+import re
+
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    MessageHandler,
+    CallbackQueryHandler,
+    ContextTypes,
+    ConversationHandler,
+    filters
+)
+
+from email_monitor import EmailMonitor
+from users_db import UserDatabase
 
 # Configure logging
 logging.basicConfig(
-    level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.StreamHandler(sys.stdout)
-    ]
+    level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
-class OutlookTelegramNotifier:
+# Conversation states
+START, EMAIL, PASSWORD, CONFIRM, MENU = range(5)
+
+class OutlookEmailWatcherBot:
     def __init__(self):
-        """Initialize the bot with environment variables"""
-        # Load configuration from environment variables
-        self.email_address = os.getenv('OUTLOOK_EMAIL')
-        self.password = os.getenv('OUTLOOK_PASSWORD')
+        """Initialize the bot"""
         self.telegram_token = os.getenv('TELEGRAM_BOT_TOKEN')
-        self.chat_id = os.getenv('TELEGRAM_CHAT_ID')
-        
-        # IMAP Configuration for Outlook/Office365
-        self.imap_server = os.getenv('IMAP_SERVER', 'outlook.office365.com')
-        self.imap_port = int(os.getenv('IMAP_PORT', 993))
-        
-        # Check interval in seconds (30 minutes = 1800 seconds)
-        self.check_interval = int(os.getenv('CHECK_INTERVAL_SECONDS', 1800))
-        
-        # State file to store last checked UID
-        self.state_file = 'email_state.json'
-        
-        # Validate configuration
-        self.validate_config()
-        
-        # Initialize state
-        self.state = self.load_state()
-        
-        # Last notification time for rate limiting
-        self.last_notification_time = None
-        
-        logger.info("Outlook Telegram Notifier initialized")
-        logger.info(f"Monitoring: {self.email_address}")
-        logger.info(f"Check interval: {self.check_interval} seconds")
-    
-    def validate_config(self):
-        """Validate all required environment variables"""
-        required_vars = {
-            'OUTLOOK_EMAIL': self.email_address,
-            'OUTLOOK_PASSWORD': self.password,
-            'TELEGRAM_BOT_TOKEN': self.telegram_token,
-            'TELEGRAM_CHAT_ID': self.chat_id
-        }
-        
-        missing = [var for var, val in required_vars.items() if not val]
-        if missing:
-            logger.error(f"Missing required environment variables: {', '.join(missing)}")
-            logger.error("Please set these in Railway environment variables")
+        if not self.telegram_token:
+            logger.error("TELEGRAM_BOT_TOKEN environment variable not set")
             sys.exit(1)
-    
-    def load_state(self) -> Dict:
-        """Load bot state from file"""
-        try:
-            if os.path.exists(self.state_file):
-                with open(self.state_file, 'r') as f:
-                    return json.load(f)
-        except Exception as e:
-            logger.warning(f"Could not load state file: {e}")
         
-        # Default state
-        return {
-            'last_uid': 0,
-            'last_check': None,
-            'processed_emails': []
-        }
-    
-    def save_state(self):
-        """Save bot state to file"""
-        try:
-            self.state['last_check'] = datetime.now().isoformat()
-            with open(self.state_file, 'w') as f:
-                json.dump(self.state, f, indent=2)
-        except Exception as e:
-            logger.error(f"Could not save state: {e}")
-    
-    def connect_imap(self) -> Optional[imaplib.IMAP4_SSL]:
-        """Establish IMAP connection to Outlook"""
-        try:
-            logger.info(f"Connecting to {self.imap_server}:{self.imap_port}")
-            mail = imaplib.IMAP4_SSL(self.imap_server, self.imap_port)
-            mail.login(self.email_address, self.password)
-            mail.select('INBOX')
-            logger.info("IMAP connection established successfully")
-            return mail
-        except imaplib.IMAP4.error as e:
-            logger.error(f"IMAP authentication failed: {e}")
-            logger.info("Note: If you have 2FA enabled, use an app password")
-        except Exception as e:
-            logger.error(f"IMAP connection failed: {e}")
-        return None
-    
-    def get_latest_uids(self, mail, count=10) -> List[int]:
-        """Get latest email UIDs from inbox"""
-        try:
-            # Search for all emails, sorted by date
-            status, data = mail.uid('search', None, 'ALL')
-            if status == 'OK' and data[0]:
-                uids = [int(uid) for uid in data[0].split()]
-                # Return latest UIDs (newest first)
-                return sorted(uids, reverse=True)[:count]
-        except Exception as e:
-            logger.error(f"Error fetching UIDs: {e}")
-        return []
-    
-    def fetch_email(self, mail, uid: int) -> Optional[email.message.Message]:
-        """Fetch email by UID"""
-        try:
-            status, data = mail.uid('fetch', str(uid).encode(), '(RFC822)')
-            if status == 'OK' and data[0]:
-                raw_email = data[0][1]
-                return email.message_from_bytes(raw_email)
-        except Exception as e:
-            logger.error(f"Error fetching email {uid}: {e}")
-        return None
-    
-    def parse_email(self, msg: email.message.Message) -> Dict:
-        """Parse email content into structured format"""
-        email_data = {
-            'subject': 'No Subject',
-            'from_name': 'Unknown',
-            'from_email': 'unknown@example.com',
-            'date': 'Unknown',
-            'body': '',
-            'has_attachments': False,
-            'attachments': []
-        }
+        self.user_db = UserDatabase()
+        self.email_monitors: Dict[int, EmailMonitor] = {}
         
-        try:
-            # Parse subject
-            subject, encoding = decode_header(msg.get('Subject', ''))[0]
-            if isinstance(subject, bytes):
-                subject = subject.decode(encoding if encoding else 'utf-8')
-            email_data['subject'] = subject.strip() or 'No Subject'
+        # Create application
+        self.application = Application.builder().token(self.telegram_token).build()
+        
+        # Set up conversation handler
+        self.setup_handlers()
+        
+    def setup_handlers(self):
+        """Set up all Telegram handlers"""
+        
+        # Conversation handler for registration
+        conv_handler = ConversationHandler(
+            entry_points=[CommandHandler('start', self.start_command)],
+            states={
+                EMAIL: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.get_email)],
+                PASSWORD: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.get_password)],
+                CONFIRM: [CallbackQueryHandler(self.confirm_credentials)],
+                MENU: [
+                    CallbackQueryHandler(self.menu_handler),
+                    CommandHandler('stop', self.stop_monitoring),
+                    CommandHandler('status', self.check_status),
+                    CommandHandler('help', self.help_command)
+                ]
+            },
+            fallbacks=[CommandHandler('cancel', self.cancel_command)],
+            allow_reentry=True
+        )
+        
+        # Add handlers
+        self.application.add_handler(conv_handler)
+        self.application.add_handler(CommandHandler('help', self.help_command))
+        self.application.add_handler(CommandHandler('status', self.check_status))
+        self.application.add_handler(CommandHandler('stop', self.stop_monitoring))
+        self.application.add_handler(MessageHandler(filters.COMMAND, self.unknown_command))
+        
+        # Error handler
+        self.application.add_error_handler(self.error_handler)
+    
+    async def start_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+        """Start command - begin the conversation"""
+        user_id = update.effective_user.id
+        
+        # Check if user is already registered
+        if self.user_db.user_exists(user_id):
+            await update.message.reply_text(
+                "👋 Welcome back!\n\n"
+                "You're already registered. Here are your options:",
+                reply_markup=self.get_main_menu_keyboard()
+            )
+            return MENU
+        
+        await update.message.reply_text(
+            "👋 Welcome to Outlook Email Watcher Bot!\n\n"
+            "I'll monitor your Outlook inbox and notify you of new emails.\n\n"
+            "📧 Please enter your Outlook email address:"
+        )
+        return EMAIL
+    
+    async def get_email(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+        """Get email address from user"""
+        email = update.message.text.strip()
+        
+        # Validate email format
+        if not self.is_valid_email(email):
+            await update.message.reply_text(
+                "❌ Invalid email format. Please enter a valid Outlook email address:"
+            )
+            return EMAIL
+        
+        # Save email to context
+        context.user_data['email'] = email
+        
+        await update.message.reply_text(
+            f"📧 Email received: {email}\n\n"
+            "🔐 Now, please enter your password:\n\n"
+            "⚠️ Note: If you have 2FA enabled, you'll need to use an "
+            "App Password from Microsoft."
+        )
+        return PASSWORD
+    
+    async def get_password(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+        """Get password from user"""
+        password = update.message.text.strip()
+        
+        # Save password to context
+        context.user_data['password'] = password
+        
+        # Show confirmation
+        keyboard = [
+            [
+                InlineKeyboardButton("✅ Yes, start monitoring", callback_data="confirm"),
+                InlineKeyboardButton("❌ No, change email", callback_data="change_email")
+            ]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await update.message.reply_text(
+            f"📋 Please confirm your credentials:\n\n"
+            f"📧 Email: {context.user_data['email']}\n"
+            f"🔐 Password: {'*' * len(password)}\n\n"
+            f"Click 'Yes' to start monitoring your inbox:",
+            reply_markup=reply_markup
+        )
+        return CONFIRM
+    
+    async def confirm_credentials(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+        """Handle confirmation of credentials"""
+        query = update.callback_query
+        await query.answer()
+        
+        user_id = update.effective_user.id
+        
+        if query.data == "confirm":
+            email = context.user_data['email']
+            password = context.user_data['password']
             
-            # Parse sender
-            from_header = msg.get('From', '')
-            name, email_addr = self.parse_sender(from_header)
-            email_data['from_name'] = name
-            email_data['from_email'] = email_addr
-            
-            # Parse date
-            email_data['date'] = msg.get('Date', 'Unknown')
-            
-            # Parse body and check for attachments
-            email_data['body'], email_data['has_attachments'], email_data['attachments'] = \
-                self.extract_email_content(msg)
+            try:
+                # Test connection with provided credentials
+                await query.edit_message_text("🔐 Testing your credentials...")
                 
-        except Exception as e:
-            logger.error(f"Error parsing email: {e}")
+                # Test IMAP connection
+                monitor = EmailMonitor(user_id, email, password)
+                test_result = await asyncio.to_thread(monitor.test_connection)
+                
+                if test_result:
+                    # Save user credentials
+                    self.user_db.save_user(user_id, email, password)
+                    
+                    # Start monitoring
+                    await self.start_user_monitoring(user_id, email, password, update, context)
+                    
+                    await query.edit_message_text(
+                        "✅ Registration successful!\n\n"
+                        f"📧 Now monitoring: {email}\n"
+                        "⏱️ Checking for new emails every 30 minutes\n\n"
+                        "You'll receive notifications for new emails here.",
+                        reply_markup=self.get_main_menu_keyboard()
+                    )
+                    return MENU
+                else:
+                    await query.edit_message_text(
+                        "❌ Failed to connect to Outlook.\n\n"
+                        "Possible issues:\n"
+                        "1. Incorrect email or password\n"
+                        "2. IMAP not enabled in Outlook settings\n"
+                        "3. 2FA enabled (use App Password)\n\n"
+                        "Please try again with /start"
+                    )
+                    return ConversationHandler.END
+                    
+            except Exception as e:
+                logger.error(f"Error during registration: {e}")
+                await query.edit_message_text(
+                    f"❌ Error: {str(e)}\n\n"
+                    "Please try again with /start"
+                )
+                return ConversationHandler.END
         
-        return email_data
+        elif query.data == "change_email":
+            await query.edit_message_text("📧 Please enter your Outlook email address:")
+            return EMAIL
     
-    def parse_sender(self, from_header: str) -> Tuple[str, str]:
-        """Extract name and email from From header"""
+    async def start_user_monitoring(self, user_id: int, email: str, password: str, 
+                                   update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Start email monitoring for a user"""
         try:
-            # Pattern: "Name <email@domain.com>"
-            match = re.match(r'^"?([^"<]+)"?\s*<([^>]+)>$', from_header)
-            if match:
-                return match.group(1).strip(), match.group(2).strip()
+            # Create and start monitor
+            monitor = EmailMonitor(user_id, email, password)
+            self.email_monitors[user_id] = monitor
             
-            # Pattern: email@domain.com
-            email_match = re.search(r'([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})', from_header)
-            if email_match:
-                return from_header, email_match.group(1)
+            # Start monitoring in background
+            asyncio.create_task(self.monitor_emails_loop(user_id, monitor, context))
             
-        except Exception:
-            pass
-        
-        return from_header or 'Unknown', from_header or 'unknown@example.com'
-    
-    def extract_email_content(self, msg) -> Tuple[str, bool, List]:
-        """Extract text body and attachment info from email"""
-        body = ""
-        has_attachments = False
-        attachments = []
-        
-        try:
-            if msg.is_multipart():
-                for part in msg.walk():
-                    content_type = part.get_content_type()
-                    content_disposition = str(part.get("Content-Disposition", ""))
-                    
-                    # Skip multipart containers
-                    if content_type == "multipart/alternative" or content_type == "multipart/mixed":
-                        continue
-                    
-                    # Check for attachments
-                    if "attachment" in content_disposition or "filename" in content_disposition:
-                        has_attachments = True
-                        filename = part.get_filename()
-                        if filename:
-                            attachments.append(filename)
-                        continue
-                    
-                    # Get text body
-                    if content_type == "text/plain" and "attachment" not in content_disposition:
-                        try:
-                            payload = part.get_payload(decode=True)
-                            charset = part.get_content_charset() or 'utf-8'
-                            body = payload.decode(charset, errors='ignore')
-                        except:
-                            pass
-            else:
-                # Simple email without multipart
-                try:
-                    payload = msg.get_payload(decode=True)
-                    charset = msg.get_content_charset() or 'utf-8'
-                    body = payload.decode(charset, errors='ignore')
-                except:
-                    pass
-                    
+            logger.info(f"Started monitoring for user {user_id} ({email})")
+            
         except Exception as e:
-            logger.error(f"Error extracting email content: {e}")
-        
-        # Clean body text
-        body = re.sub(r'\s+', ' ', body).strip()
-        return body, has_attachments, attachments
+            logger.error(f"Failed to start monitoring for user {user_id}: {e}")
+            await context.bot.send_message(
+                chat_id=user_id,
+                text=f"❌ Failed to start monitoring: {str(e)}"
+            )
     
-    def format_telegram_message(self, email_data: Dict) -> str:
-        """Format email data for Telegram message"""
-        subject = self.escape_markdown(email_data['subject'])
-        from_name = self.escape_markdown(email_data['from_name'])
-        from_email = email_data['from_email']
-        date = email_data['date']
-        body_preview = self.escape_markdown(email_data['body'][:500])  # Limit preview length
+    async def monitor_emails_loop(self, user_id: int, monitor: EmailMonitor, 
+                                 context: ContextTypes.DEFAULT_TYPE):
+        """Continuous email monitoring loop for a user"""
+        check_interval = 1800  # 30 minutes
+        
+        while user_id in self.email_monitors:
+            try:
+                # Check for new emails
+                new_emails = await asyncio.to_thread(monitor.check_new_emails)
+                
+                # Send notifications for new emails
+                for email_data in new_emails:
+                    await self.send_email_notification(user_id, email_data, context)
+                
+                # Wait for next check
+                await asyncio.sleep(check_interval)
+                
+            except Exception as e:
+                logger.error(f"Error in monitoring loop for user {user_id}: {e}")
+                await asyncio.sleep(60)  # Wait before retry
+    
+    async def send_email_notification(self, user_id: int, email_data: Dict, 
+                                     context: ContextTypes.DEFAULT_TYPE):
+        """Send email notification to user"""
+        try:
+            message = self.format_email_notification(email_data)
+            await context.bot.send_message(
+                chat_id=user_id,
+                text=message,
+                parse_mode='HTML'
+            )
+        except Exception as e:
+            logger.error(f"Failed to send notification to user {user_id}: {e}")
+    
+    def format_email_notification(self, email_data: Dict) -> str:
+        """Format email data for Telegram notification"""
+        subject = self.escape_html(email_data.get('subject', 'No Subject'))
+        sender_name = self.escape_html(email_data.get('from_name', 'Unknown'))
+        sender_email = email_data.get('from_email', '')
+        preview = self.escape_html(email_data.get('preview', '')[:200])
         
         # Format attachments info
+        attachments = email_data.get('attachments', [])
         attachments_info = ""
-        if email_data['has_attachments']:
-            if email_data['attachments']:
-                attachment_names = [self.escape_markdown(name) for name in email_data['attachments'][:3]]
-                attachments_info = f"📎 *Attachments:* {', '.join(attachment_names)}"
-                if len(email_data['attachments']) > 3:
-                    attachments_info += f" (+{len(email_data['attachments']) - 3} more)"
-            else:
-                attachments_info = "📎 *Has attachments*"
+        if attachments:
+            attachments_info = f"\n📎 <b>Attachments:</b> {len(attachments)} file(s)"
         
         message = f"""
-📬 *New Email Received*
+📬 <b>New Email Received</b>
 
-*From:* {from_name}
-`{from_email}`
-*Subject:* {subject}
-*Date:* {date}
+<b>From:</b> {sender_name}
+<code>{sender_email}</code>
 
+<b>Subject:</b> {subject}
+
+<b>Preview:</b>
+{preview}...
 {attachments_info}
-
-*Preview:*
-{body_preview}...
 """
-        
         return message.strip()
     
-    def escape_markdown(self, text: str) -> str:
-        """Escape Markdown special characters for Telegram"""
+    def escape_html(self, text: str) -> str:
+        """Escape HTML special characters"""
         if not text:
             return ""
-        escape_chars = r'\_*[]()~`>#+-=|{}.!'
-        for char in escape_chars:
-            text = text.replace(char, f'\\{char}')
-        return text
+        html_escape_table = {
+            "&": "&amp;",
+            '"': "&quot;",
+            "'": "&apos;",
+            ">": "&gt;",
+            "<": "&lt;"
+        }
+        return "".join(html_escape_table.get(c, c) for c in text)
     
-    def send_telegram_notification(self, message: str):
-        """Send notification to Telegram"""
-        try:
-            url = f"https://api.telegram.org/bot{self.telegram_token}/sendMessage"
-            payload = {
-                'chat_id': self.chat_id,
-                'text': message,
-                'parse_mode': 'Markdown',
-                'disable_web_page_preview': True
-            }
-            
-            response = requests.post(url, json=payload, timeout=10)
-            response.raise_for_status()
-            
-            logger.info(f"Telegram notification sent successfully")
-            return True
-            
-        except requests.exceptions.RequestException as e:
-            logger.error(f"Failed to send Telegram notification: {e}")
-            return False
+    async def menu_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+        """Handle main menu actions"""
+        query = update.callback_query
+        await query.answer()
+        
+        user_id = update.effective_user.id
+        
+        if query.data == "status":
+            if user_id in self.email_monitors:
+                status = await asyncio.to_thread(self.email_monitors[user_id].get_status)
+                await query.edit_message_text(
+                    f"📊 <b>Monitoring Status</b>\n\n"
+                    f"{status}\n\n"
+                    f"Last check: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+                    parse_mode='HTML',
+                    reply_markup=self.get_main_menu_keyboard()
+                )
+            else:
+                await query.edit_message_text(
+                    "❌ Monitoring is not active.\n"
+                    "Use /start to start monitoring.",
+                    reply_markup=self.get_main_menu_keyboard()
+                )
+        
+        elif query.data == "help":
+            await query.edit_message_text(
+                self.get_help_text(),
+                parse_mode='HTML',
+                reply_markup=self.get_main_menu_keyboard()
+            )
+        
+        return MENU
     
-    def check_emails(self):
-        """Main email checking function"""
-        logger.info("Starting email check...")
+    async def stop_monitoring(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Stop email monitoring"""
+        user_id = update.effective_user.id
         
-        mail = self.connect_imap()
-        if not mail:
-            logger.error("Failed to connect to IMAP server")
-            return
+        if user_id in self.email_monitors:
+            # Stop monitoring
+            self.email_monitors.pop(user_id, None)
+            
+            # Clear user data (optional)
+            # self.user_db.delete_user(user_id)
+            
+            await update.message.reply_text(
+                "🛑 Monitoring stopped.\n\n"
+                "Your credentials have been removed.\n"
+                "Use /start to set up monitoring again."
+            )
+        else:
+            await update.message.reply_text(
+                "ℹ️ No active monitoring session found.\n"
+                "Use /start to begin monitoring."
+            )
+    
+    async def check_status(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Check monitoring status"""
+        user_id = update.effective_user.id
         
-        try:
-            # Get latest emails
-            latest_uids = self.get_latest_uids(mail, count=20)
-            
-            if not latest_uids:
-                logger.info("No emails found in inbox")
-                return
-            
-            # Filter for new emails (UIDs greater than last checked)
-            last_uid = self.state.get('last_uid', 0)
-            new_uids = [uid for uid in latest_uids if uid > last_uid]
-            
-            if not new_uids:
-                logger.info(f"No new emails (last UID: {last_uid})")
-                return
-            
-            logger.info(f"Found {len(new_uids)} new email(s)")
-            
-            # Process new emails (from oldest to newest)
-            for uid in sorted(new_uids):
-                msg = self.fetch_email(mail, uid)
-                if msg:
-                    email_data = self.parse_email(msg)
-                    
-                    # Skip if email is empty or spam-like
-                    if self.should_notify(email_data):
-                        telegram_message = self.format_telegram_message(email_data)
-                        if self.send_telegram_notification(telegram_message):
-                            # Mark as processed
-                            self.state.setdefault('processed_emails', []).append(uid)
-                            logger.info(f"Processed email UID {uid}: {email_data['subject'][:50]}...")
-                    
-                    # Update last UID
-                    if uid > last_uid:
-                        last_uid = uid
-            
-            # Update state
-            self.state['last_uid'] = last_uid
-            self.save_state()
-            
-            logger.info(f"Email check completed. Last UID: {last_uid}")
-            
-        except Exception as e:
-            logger.error(f"Error during email check: {e}")
-        finally:
+        if user_id in self.email_monitors:
+            status = await asyncio.to_thread(self.email_monitors[user_id].get_status)
+            await update.message.reply_text(
+                f"📊 <b>Monitoring Status</b>\n\n{status}",
+                parse_mode='HTML'
+            )
+        else:
+            await update.message.reply_text(
+                "❌ No active monitoring session.\n"
+                "Use /start to begin monitoring."
+            )
+    
+    async def help_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Show help message"""
+        await update.message.reply_text(
+            self.get_help_text(),
+            parse_mode='HTML'
+        )
+    
+    def get_help_text(self) -> str:
+        """Get help text"""
+        return """
+<b>📧 Outlook Email Watcher Bot</b>
+
+<b>Commands:</b>
+/start - Start or reconfigure monitoring
+/stop - Stop monitoring and remove credentials
+/status - Check monitoring status
+/help - Show this help message
+
+<b>Features:</b>
+• Monitors your Outlook inbox
+• Sends notifications for new emails
+• Checks every 30 minutes
+• Secure credential storage
+• Attachment detection
+
+<b>Setup Notes:</b>
+1. IMAP must be enabled in Outlook settings
+2. If you have 2FA, use an App Password
+3. Notifications will be sent here
+
+<b>Privacy:</b>
+• Credentials are encrypted
+• Only email metadata is accessed
+• No emails are stored permanently
+"""
+    
+    async def cancel_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+        """Cancel the conversation"""
+        await update.message.reply_text(
+            "Operation cancelled.\n"
+            "Use /start to begin setup again."
+        )
+        return ConversationHandler.END
+    
+    async def unknown_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Handle unknown commands"""
+        await update.message.reply_text(
+            "Sorry, I didn't understand that command.\n"
+            "Use /help to see available commands."
+        )
+    
+    def get_main_menu_keyboard(self) -> InlineKeyboardMarkup:
+        """Get main menu keyboard"""
+        keyboard = [
+            [InlineKeyboardButton("📊 Status", callback_data="status")],
+            [InlineKeyboardButton("❓ Help", callback_data="help")],
+            [InlineKeyboardButton("🛑 Stop Monitoring", callback_data="stop")]
+        ]
+        return InlineKeyboardMarkup(keyboard)
+    
+    def is_valid_email(self, email: str) -> bool:
+        """Validate email format"""
+        pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+        return re.match(pattern, email) is not None
+    
+    async def error_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Handle errors"""
+        logger.error(f"Update {update} caused error {context.error}")
+        
+        if update and update.effective_user:
             try:
-                mail.close()
-                mail.logout()
+                await context.bot.send_message(
+                    chat_id=update.effective_user.id,
+                    text="❌ An error occurred. Please try again."
+                )
             except:
                 pass
     
-    def should_notify(self, email_data: Dict) -> bool:
-        """Filter to decide whether to notify about an email"""
-        subject = email_data['subject'].lower()
-        sender = email_data['from_email'].lower()
-        
-        # Skip common spam patterns
-        spam_keywords = [
-            'unsubscribe', 'newsletter', 'promotion', 'special offer',
-            'dear customer', 'valued customer', 'notification'
-        ]
-        
-        # Skip if subject contains spam keywords
-        if any(keyword in subject for keyword in spam_keywords):
-            logger.info(f"Skipping email (spam keyword): {subject[:50]}...")
-            return False
-        
-        # Optional: Add specific sender whitelist/blacklist
-        # Example: Whitelist important senders
-        # important_senders = ['important@company.com']
-        # if sender not in important_senders:
-        #     return False
-        
-        return True
-    
     def run(self):
-        """Main bot loop"""
-        logger.info("=" * 50)
-        logger.info("Outlook Telegram Notifier Bot Started")
-        logger.info(f"Email: {self.email_address}")
-        logger.info(f"Check interval: {self.check_interval} seconds")
-        logger.info("=" * 50)
-        
-        # Initial check
-        self.check_emails()
-        
-        # Continuous checking loop
-        while True:
-            try:
-                logger.info(f"Sleeping for {self.check_interval} seconds...")
-                time.sleep(self.check_interval)
-                
-                # Perform check
-                self.check_emails()
-                
-            except KeyboardInterrupt:
-                logger.info("Bot stopped by user")
-                break
-            except Exception as e:
-                logger.error(f"Unexpected error in main loop: {e}")
-                time.sleep(60)  # Wait before retrying
+        """Run the bot"""
+        logger.info("Starting Outlook Email Watcher Bot...")
+        self.application.run_polling(allowed_updates=Update.ALL_TYPES)
 
-def main():
-    """Entry point for the application"""
-    notifier = OutlookTelegramNotifier()
-    notifier.run()
+async def main():
+    """Main function"""
+    bot = OutlookEmailWatcherBot()
+    await bot.application.initialize()
+    await bot.application.start()
+    await bot.application.updater.start_polling()
+    
+    # Keep running
+    await asyncio.Event().wait()
 
-if __name__ == "__main__":
-    main()
+if __name__ == '__main__':
+    asyncio.run(main())
