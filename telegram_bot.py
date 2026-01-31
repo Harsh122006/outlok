@@ -1,39 +1,30 @@
 import os
-from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
+from telegram.ext import Application, CommandHandler
 
-BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
+BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 
-
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def start(update, context):
     await update.message.reply_text(
-        "👋 Welcome!\n\nUse /connect to link your Outlook account."
+        "Use /connect to link Outlook account"
     )
 
-
-async def connect(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    client_id = os.environ.get("MS_CLIENT_ID")
-    redirect_uri = os.environ.get("REDIRECT_URI")
-
+async def connect(update, context):
     auth_url = (
         "https://login.microsoftonline.com/common/oauth2/v2.0/authorize"
-        f"?client_id={client_id}"
+        "?client_id=" + os.getenv("MS_CLIENT_ID") +
         "&response_type=code"
-        f"&redirect_uri={redirect_uri}"
+        "&redirect_uri=" + os.getenv("REDIRECT_URI") +
         "&response_mode=query"
-        "&scope=offline_access Mail.Read"
+        "&scope=offline_access%20Mail.Read"
     )
+    await update.message.reply_text(auth_url)
 
-    await update.message.reply_text(
-        f"🔐 Click to connect your Outlook:\n{auth_url}"
-    )
-
-
-def start_telegram_bot():
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
-
+async def start_bot():
+    app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("connect", connect))
-
-    print("✅ Telegram bot started")
-    app.run_polling()   # ← IMPORTANT: no asyncio here
+    await app.initialize()
+    await app.start()
+    await app.bot.initialize()
+    print("🤖 Bot polling")
+    await app.stop()  # keeps task alive
