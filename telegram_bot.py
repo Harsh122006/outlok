@@ -1,6 +1,6 @@
 import os
 import aiohttp
-from datetime import datetime, timedelta
+from datetime import datetime, timeddelta
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, ContextTypes
 
@@ -26,9 +26,24 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def connect(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    redirect_uri = f"{WEBHOOK_URL}/auth/callback" if WEBHOOK_URL else ""
     
-    auth_url = f"https://login.microsoftonline.com/consumers/oauth2/v2.0/authorize?client_id={CLIENT_ID}&response_type=code&redirect_uri={redirect_uri}&scope=Mail.Read offline_access&state={user_id}"
+    # FIX: Ensure WEBHOOK_URL is properly set
+    if not WEBHOOK_URL:
+        await update.message.reply_text("❌ Server URL not configured")
+        return
+    
+    # FIX: Proper redirect URI with https
+    redirect_uri = f"https://{WEBHOOK_URL.split('//')[-1]}/auth/callback"
+    
+    # FIX: Properly encoded URL
+    auth_url = (
+        f"https://login.microsoftonline.com/consumers/oauth2/v2.0/authorize"
+        f"?client_id={CLIENT_ID}"
+        f"&response_type=code"
+        f"&redirect_uri={redirect_uri}"
+        f"&scope=Mail.Read%20offline_access"
+        f"&state={user_id}"
+    )
     
     keyboard = [[InlineKeyboardButton("🔗 Connect Outlook", url=auth_url)]]
     reply_markup = InlineKeyboardMarkup(keyboard)
@@ -45,7 +60,14 @@ async def inbox(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Please use /connect first")
         return
     
-    await update.message.reply_text("✅ Email feature will work after authorization")
+    tokens = user_tokens[user_id]
+    
+    # Check if token is expired
+    if datetime.now() > tokens.get('expires_at', datetime.now()):
+        await update.message.reply_text("❌ Session expired. Use /connect again")
+        return
+    
+    await update.message.reply_text("✅ Fetching emails...")
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
@@ -59,7 +81,10 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def exchange_code_for_token(code: str):
     """Exchange auth code for tokens"""
-    redirect_uri = f"{WEBHOOK_URL}/auth/callback" if WEBHOOK_URL else ""
+    if not WEBHOOK_URL:
+        return None
+    
+    redirect_uri = f"https://{WEBHOOK_URL.split('//')[-1]}/auth/callback"
     
     token_url = "https://login.microsoftonline.com/consumers/oauth2/v2.0/token"
     data = {
@@ -78,8 +103,8 @@ async def exchange_code_for_token(code: str):
                     tokens = await response.json()
                     tokens['expires_at'] = datetime.now() + timedelta(seconds=tokens.get('expires_in', 3600))
                     return tokens
-    except:
-        pass
+    except Exception as e:
+        print(f"Token exchange error: {e}")
     return None
 
 def handle_auth_callback(code: str, state: str):
@@ -93,8 +118,8 @@ def handle_auth_callback(code: str, state: str):
         if tokens:
             user_tokens[user_id] = tokens
             return user_id, True
-    except:
-        pass
+    except Exception as e:
+        print(f"Auth callback error: {e}")
     return None, False
 
 # ==================== CREATE APPLICATION ====================
