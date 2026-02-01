@@ -1,29 +1,27 @@
 import asyncio
-import threading
 import logging
 from flask import Flask, request, jsonify
+import config
 from telegram_bot import create_application, handle_auth_callback
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
-# Global Telegram application instance
-telegram_app = None
-bot_thread = None
+# Initialize Telegram bot
+telegram_app = create_application()
+
+# ==================== FLASK ROUTES ====================
 
 @app.route("/")
 def health():
-    """Health check endpoint"""
+    """Health check"""
     return jsonify({
-        "status": "healthy",
+        "status": "online",
         "service": "Telegram Outlook Bot",
-        "endpoints": ["/", "/auth/callback"]
+        "webhook": f"{config.WEBHOOK_URL}/webhook" if config.WEBHOOK_URL else "Not set",
+        "connected_users": len(config.user_tokens)
     })
 
 @app.route("/auth/callback")
@@ -33,164 +31,171 @@ def auth_callback():
     state = request.args.get("state")
     
     if not code or not state:
-        return """
-        <html>
-            <body>
-                <h2>❌ Authorization Failed</h2>
-                <p>Missing code or state parameter.</p>
-                <p>Return to Telegram and try /connect again.</p>
-            </body>
-        </html>
-        """, 400
+        return "Missing parameters", 400
     
-    # Handle the auth callback
     user_id, success = handle_auth_callback(code, state)
     
-    if success:
-        # Try to notify user (async)
-        async def send_notification():
-            try:
-                await telegram_app.bot.send_message(
-                    chat_id=user_id,
-                    text="✅ *Outlook Connected Successfully!*\n\n"
-                         "You can now use:\n"
-                         "• /inbox - Read latest emails\n"
-                         "• /unread - Show unread emails\n\n"
-                         "Happy email reading! 📧",
-                    parse_mode='Markdown'
-                )
-                logger.info(f"Sent connection confirmation to user {user_id}")
-            except Exception as e:
-                logger.error(f"Failed to notify user {user_id}: {e}")
-        
-        # Run notification in background
-        if telegram_app:
-            asyncio.run_coroutine_threadsafe(send_notification(), telegram_app.bot._loop)
+    # Notify user in Telegram
+    async def send_notification():
+        try:
+            await telegram_app.bot.send_message(
+                chat_id=user_id,
+                text="✅ *Outlook Connected!*\n\nUse /inbox to read your emails.",
+                parse_mode='Markdown'
+            )
+            logger.info(f"Notified user {user_id}")
+        except Exception as e:
+            logger.error(f"Failed to notify user: {e}")
     
-    # Return success page
+    if success and user_id:
+        asyncio.run(send_notification())
+    
+    # Return HTML page
     return """
+    <!DOCTYPE html>
     <html>
-        <head>
-            <title>Outlook Connected</title>
-            <style>
-                body {
-                    font-family: Arial, sans-serif;
-                    text-align: center;
-                    padding: 50px;
-                    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-                    color: white;
-                    min-height: 100vh;
-                    display: flex;
-                    justify-content: center;
-                    align-items: center;
-                }
-                .container {
-                    background: rgba(255, 255, 255, 0.1);
-                    padding: 40px;
-                    border-radius: 20px;
-                    backdrop-filter: blur(10px);
-                    max-width: 500px;
-                }
-                h1 { font-size: 2.5em; margin-bottom: 20px; }
-                p { font-size: 1.2em; line-height: 1.6; opacity: 0.9; }
-                .success { color: #4CAF50; font-size: 4em; }
-                .button {
-                    display: inline-block;
-                    margin-top: 20px;
-                    padding: 10px 20px;
-                    background: white;
-                    color: #667eea;
-                    text-decoration: none;
-                    border-radius: 5px;
-                    font-weight: bold;
-                }
-            </style>
-        </head>
-        <body>
-            <div class="container">
-                <div class="success">✅</div>
-                <h1>Outlook Connected!</h1>
-                <p>Your Outlook account has been successfully linked with the Telegram bot.</p>
-                <p>You can now close this window and return to Telegram.</p>
-                <a href="https://t.me/" class="button">Return to Telegram</a>
-            </div>
-            <script>
-                // Auto-close after 3 seconds
-                setTimeout(() => window.close(), 3000);
-            </script>
-        </body>
+    <head>
+        <title>Outlook Connected</title>
+        <style>
+            body {
+                font-family: Arial, sans-serif;
+                text-align: center;
+                padding: 50px;
+                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                color: white;
+                min-height: 100vh;
+                display: flex;
+                justify-content: center;
+                align-items: center;
+                margin: 0;
+            }
+            .container {
+                background: rgba(255, 255, 255, 0.1);
+                padding: 40px;
+                border-radius: 20px;
+                backdrop-filter: blur(10px);
+                max-width: 500px;
+            }
+            h1 {
+                font-size: 2.5em;
+                margin-bottom: 20px;
+            }
+            p {
+                font-size: 1.2em;
+                line-height: 1.6;
+                opacity: 0.9;
+            }
+            .success {
+                color: #4CAF50;
+                font-size: 4em;
+                margin-bottom: 20px;
+            }
+            .button {
+                display: inline-block;
+                margin-top: 20px;
+                padding: 12px 24px;
+                background: white;
+                color: #667eea;
+                text-decoration: none;
+                border-radius: 8px;
+                font-weight: bold;
+                border: none;
+                cursor: pointer;
+                font-size: 1em;
+            }
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <div class="success">✅</div>
+            <h1>Successfully Connected!</h1>
+            <p>Your Outlook account is now linked with the Telegram bot.</p>
+            <p>You can close this window and return to Telegram.</p>
+            <button onclick="window.close()" class="button">Close Window</button>
+        </div>
+        <script>
+            // Auto-close after 3 seconds
+            setTimeout(() => {
+                window.close();
+            }, 3000);
+        </script>
+    </body>
     </html>
     """
 
-@app.route("/debug")
-def debug():
-    """Debug endpoint to see connected users"""
-    from telegram_bot import user_tokens
-    return jsonify({
-        "connected_users": len(user_tokens),
-        "users": list(user_tokens.keys()),
-        "bot_running": telegram_app is not None
-    })
+@app.route("/webhook", methods=["POST"])
+def webhook():
+    """Handle Telegram webhook updates"""
+    if request.is_json:
+        update_data = request.get_json()
+        
+        async def process_update():
+            from telegram import Update
+            update = Update.de_json(update_data, telegram_app.bot)
+            await telegram_app.process_update(update)
+        
+        # Process update in background
+        asyncio.run(process_update())
+        
+    return jsonify({"status": "ok"})
 
-def run_bot():
-    """Run Telegram bot in a separate thread"""
-    global telegram_app
+@app.route("/set-webhook", methods=["GET", "POST"])
+async def set_webhook():
+    """Set Telegram webhook (call this once after deployment)"""
+    if not config.WEBHOOK_URL:
+        return jsonify({"error": "WEBHOOK_URL not set"}), 400
     
-    # Create new event loop for this thread
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
+    webhook_url = f"{config.WEBHOOK_URL}/webhook"
     
     try:
-        # Create and start Telegram application
-        telegram_app = create_application()
+        # Initialize the application
+        await telegram_app.initialize()
         
-        # Run bot with polling
-        loop.run_until_complete(telegram_app.initialize())
-        loop.run_until_complete(telegram_app.start())
-        loop.run_until_complete(telegram_app.updater.start_polling())
+        # Set webhook
+        result = await telegram_app.bot.set_webhook(webhook_url)
         
-        logger.info("✅ Telegram bot started successfully!")
+        # Start the application
+        await telegram_app.start()
         
-        # Keep the event loop running
-        loop.run_forever()
-        
+        return jsonify({
+            "success": result,
+            "webhook_url": webhook_url,
+            "bot_username": (await telegram_app.bot.get_me()).username
+        })
     except Exception as e:
-        logger.error(f"Bot thread error: {e}")
-    finally:
-        if telegram_app:
-            loop.run_until_complete(telegram_app.stop())
-            loop.run_until_complete(telegram_app.shutdown())
-        loop.close()
+        return jsonify({"error": str(e)}), 500
 
-def start_bot_thread():
-    """Start bot in a separate thread"""
-    global bot_thread
-    if bot_thread and bot_thread.is_alive():
-        logger.warning("Bot thread is already running")
-        return
-    
-    bot_thread = threading.Thread(target=run_bot, daemon=True)
-    bot_thread.start()
-    logger.info("Bot thread started")
+@app.route("/debug")
+def debug():
+    """Debug info"""
+    return jsonify({
+        "connected_users": list(config.user_tokens.keys()),
+        "total_users": len(config.user_tokens),
+        "webhook_url": f"{config.WEBHOOK_URL}/webhook" if config.WEBHOOK_URL else None,
+        "redirect_uri": config.REDIRECT_URI
+    })
 
-# Start bot thread when Flask app starts
-@app.before_first_request
-def initialize():
-    """Initialize bot thread before first request"""
-    start_bot_thread()
+# ==================== STARTUP ====================
 
-# Production WSGI entry point
-def create_app():
-    """Create Flask app for production WSGI servers"""
-    return app
+@app.before_request
+def initialize_bot():
+    """Initialize bot on first request"""
+    if not hasattr(app, 'bot_initialized'):
+        async def init():
+            await telegram_app.initialize()
+            await telegram_app.start()
+            
+            # Set webhook if URL is configured
+            if config.WEBHOOK_URL:
+                webhook_url = f"{config.WEBHOOK_URL}/webhook"
+                await telegram_app.bot.set_webhook(webhook_url)
+                logger.info(f"Webhook set to: {webhook_url}")
+        
+        asyncio.run(init())
+        app.bot_initialized = True
 
-# Development server (for testing only)
+# ==================== MAIN ====================
+
 if __name__ == "__main__":
-    logger.info("Starting Flask development server...")
-    
-    # Start bot thread
-    start_bot_thread()
-    
-    # Run Flask with production settings
-    from werkzeug.serving import run_simple
-    run_simple('0.0.0.0', 8080, app, use_reloader=False, use_debugger=False)
+    # Run Flask app
+    app.run(host="0.0.0.0", port=8080, debug=False)
