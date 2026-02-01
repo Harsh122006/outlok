@@ -1,12 +1,21 @@
 import asyncio
-import json
+import threading
+import logging
 from flask import Flask, request, jsonify
 from telegram_bot import create_application, handle_auth_callback
 
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
 app = Flask(__name__)
 
-# Global Telegram application
+# Global Telegram application instance
 telegram_app = None
+bot_thread = None
 
 @app.route("/")
 def health():
@@ -14,7 +23,7 @@ def health():
     return jsonify({
         "status": "healthy",
         "service": "Telegram Outlook Bot",
-        "endpoints": ["/", "/auth/callback", "/webhook"]
+        "endpoints": ["/", "/auth/callback"]
     })
 
 @app.route("/auth/callback")
@@ -37,8 +46,8 @@ def auth_callback():
     # Handle the auth callback
     user_id, success = handle_auth_callback(code, state)
     
-    if success and telegram_app:
-        # Try to notify user
+    if success:
+        # Try to notify user (async)
         async def send_notification():
             try:
                 await telegram_app.bot.send_message(
@@ -50,10 +59,13 @@ def auth_callback():
                          "Happy email reading! 📧",
                     parse_mode='Markdown'
                 )
+                logger.info(f"Sent connection confirmation to user {user_id}")
             except Exception as e:
-                print(f"Failed to notify user: {e}")
+                logger.error(f"Failed to notify user {user_id}: {e}")
         
-        asyncio.create_task(send_notification())
+        # Run notification in background
+        if telegram_app:
+            asyncio.run_coroutine_threadsafe(send_notification(), telegram_app.bot._loop)
     
     # Return success page
     return """
@@ -82,6 +94,16 @@ def auth_callback():
                 h1 { font-size: 2.5em; margin-bottom: 20px; }
                 p { font-size: 1.2em; line-height: 1.6; opacity: 0.9; }
                 .success { color: #4CAF50; font-size: 4em; }
+                .button {
+                    display: inline-block;
+                    margin-top: 20px;
+                    padding: 10px 20px;
+                    background: white;
+                    color: #667eea;
+                    text-decoration: none;
+                    border-radius: 5px;
+                    font-weight: bold;
+                }
             </style>
         </head>
         <body>
@@ -89,31 +111,16 @@ def auth_callback():
                 <div class="success">✅</div>
                 <h1>Outlook Connected!</h1>
                 <p>Your Outlook account has been successfully linked with the Telegram bot.</p>
-                <p>You can now close this window and return to Telegram to start reading your emails.</p>
-                <p><em>The bot will send you a confirmation message shortly.</em></p>
+                <p>You can now close this window and return to Telegram.</p>
+                <a href="https://t.me/" class="button">Return to Telegram</a>
             </div>
             <script>
-                // Auto-close after 5 seconds
-                setTimeout(() => window.close(), 5000);
+                // Auto-close after 3 seconds
+                setTimeout(() => window.close(), 3000);
             </script>
         </body>
     </html>
     """
-
-@app.route("/webhook", methods=["POST"])
-def webhook():
-    """Handle Telegram webhook (optional, for production)"""
-    if request.is_json:
-        update_data = request.get_json()
-        
-        async def process_update():
-            update = Update.de_json(update_data, telegram_app.bot)
-            await telegram_app.process_update(update)
-        
-        asyncio.create_task(process_update())
-        return jsonify({"status": "ok"})
-    
-    return jsonify({"error": "Invalid data"}), 400
 
 @app.route("/debug")
 def debug():
@@ -121,51 +128,69 @@ def debug():
     from telegram_bot import user_tokens
     return jsonify({
         "connected_users": len(user_tokens),
-        "users": list(user_tokens.keys())
+        "users": list(user_tokens.keys()),
+        "bot_running": telegram_app is not None
     })
 
-async def start_bot():
-    """Start the Telegram bot"""
+def run_bot():
+    """Run Telegram bot in a separate thread"""
     global telegram_app
     
-    # Create Telegram application
-    telegram_app = create_application()
+    # Create new event loop for this thread
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
     
-    # Initialize
-    await telegram_app.initialize()
-    await telegram_app.start()
-    
-    print("✅ Telegram bot started successfully!")
-    
-    # Start polling for updates
-    await telegram_app.updater.start_polling()
-    
-    # Keep the bot running
     try:
-        while True:
-            await asyncio.sleep(3600)
-    except asyncio.CancelledError:
-        pass
+        # Create and start Telegram application
+        telegram_app = create_application()
+        
+        # Run bot with polling
+        loop.run_until_complete(telegram_app.initialize())
+        loop.run_until_complete(telegram_app.start())
+        loop.run_until_complete(telegram_app.updater.start_polling())
+        
+        logger.info("✅ Telegram bot started successfully!")
+        
+        # Keep the event loop running
+        loop.run_forever()
+        
+    except Exception as e:
+        logger.error(f"Bot thread error: {e}")
     finally:
-        await telegram_app.stop()
-        await telegram_app.shutdown()
+        if telegram_app:
+            loop.run_until_complete(telegram_app.stop())
+            loop.run_until_complete(telegram_app.shutdown())
+        loop.close()
 
-def run_flask():
-    """Run Flask app"""
-    app.run(host="0.0.0.0", port=8080, debug=False)
-
-async def main():
-    """Main async function to run both bot and Flask"""
-    # Start bot in background
-    bot_task = asyncio.create_task(start_bot())
+def start_bot_thread():
+    """Start bot in a separate thread"""
+    global bot_thread
+    if bot_thread and bot_thread.is_alive():
+        logger.warning("Bot thread is already running")
+        return
     
-    # Run Flask in executor (since Flask is synchronous)
-    loop = asyncio.get_event_loop()
-    flask_task = loop.run_in_executor(None, run_flask)
-    
-    # Wait for both tasks
-    await asyncio.gather(bot_task, flask_task)
+    bot_thread = threading.Thread(target=run_bot, daemon=True)
+    bot_thread.start()
+    logger.info("Bot thread started")
 
+# Start bot thread when Flask app starts
+@app.before_first_request
+def initialize():
+    """Initialize bot thread before first request"""
+    start_bot_thread()
+
+# Production WSGI entry point
+def create_app():
+    """Create Flask app for production WSGI servers"""
+    return app
+
+# Development server (for testing only)
 if __name__ == "__main__":
-    # Start the application
-    asyncio.run(main())
+    logger.info("Starting Flask development server...")
+    
+    # Start bot thread
+    start_bot_thread()
+    
+    # Run Flask with production settings
+    from werkzeug.serving import run_simple
+    run_simple('0.0.0.0', 8080, app, use_reloader=False, use_debugger=False)
