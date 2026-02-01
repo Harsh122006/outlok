@@ -1,0 +1,32 @@
+# Ignore everything
+*
+
+# Allow specific files
+!.env
+!database.py
+!outlook_auth.py
+!email_service.py
+!bot_main.py
+!callback_server.py
+!requirements.txt
+!Dockerfile
+!docker-compose.yml
+
+# Create data directory if not exists
+!data/
+data/*
+
+# Development files
+.git/
+.gitignore
+*.pyc
+__pycache__/
+*.db
+*.log
+.env.local
+.env.development
+test/
+tests/
+*.md
+*.txt
+!requirements.txt
