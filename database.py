@@ -19,6 +19,12 @@ class User(Base):
     access_token = Column(Text)
     refresh_token = Column(Text)
     expires_at = Column(DateTime)
+    
+    # Auth state management
+    auth_state = Column(Text, nullable=True)
+    code_verifier = Column(Text, nullable=True)
+    auth_requested_at = Column(DateTime, nullable=True)
+    
     is_connected = Column(Boolean, default=False)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
