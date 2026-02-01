@@ -1,196 +1,152 @@
 import os
-import asyncio
 import logging
-from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse
 import uvicorn
 
-# Import from telegram_bot
-from telegram_bot import create_application, handle_auth_callback, user_tokens
-
 # Setup logging
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
 logger = logging.getLogger(__name__)
 
-# Global variable for Telegram app
-telegram_app = None
+app = FastAPI(title="Telegram Outlook Bot")
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    """Lifespan manager for startup/shutdown events"""
+# Try to import bot module
+try:
+    from telegram_bot import create_application, handle_auth_callback
+    telegram_app = None
+    logger.info("Successfully imported telegram_bot module")
+except Exception as e:
+    logger.error(f"Failed to import telegram_bot: {e}")
+    telegram_app = None
+
+@app.on_event("startup")
+async def startup_event():
+    """Initialize bot on startup"""
     global telegram_app
     
-    # Startup
-    logger.info("Starting Telegram Outlook Bot...")
-    
-    # Create Telegram application
-    telegram_app = create_application()
-    
-    # Initialize the bot
-    await telegram_app.initialize()
-    await telegram_app.start()
-    
-    # Set webhook for production
-    WEBHOOK_URL = os.getenv("RAILWAY_STATIC_URL")
-    if WEBHOOK_URL:
-        webhook_url = f"{WEBHOOK_URL}/webhook"
-        await telegram_app.bot.set_webhook(webhook_url)
-        logger.info(f"✅ Webhook set to: {webhook_url}")
-    else:
-        logger.warning("WEBHOOK_URL not set, webhook not configured")
-    
-    logger.info("✅ Bot started successfully!")
-    
-    yield  # App runs here
-    
-    # Shutdown
-    logger.info("Shutting down Telegram Outlook Bot...")
-    if telegram_app:
-        await telegram_app.stop()
-        await telegram_app.shutdown()
-    logger.info("Bot shutdown complete")
+    try:
+        # Check required environment variables
+        required_vars = ["TELEGRAM_BOT_TOKEN", "MS_CLIENT_ID", "MS_CLIENT_SECRET", "RAILWAY_STATIC_URL"]
+        missing = [var for var in required_vars if not os.getenv(var)]
+        
+        if missing:
+            logger.error(f"Missing environment variables: {missing}")
+            return
+        
+        # Create Telegram application
+        telegram_app = create_application()
+        
+        # Initialize the bot
+        await telegram_app.initialize()
+        await telegram_app.start()
+        
+        # Set webhook
+        WEBHOOK_URL = os.getenv("RAILWAY_STATIC_URL")
+        if WEBHOOK_URL:
+            webhook_url = f"{WEBHOOK_URL}/webhook"
+            await telegram_app.bot.set_webhook(webhook_url)
+            logger.info(f"✅ Webhook set to: {webhook_url}")
+        
+        logger.info("✅ Bot started successfully!")
+        
+    except Exception as e:
+        logger.error(f"Failed to start bot: {e}")
 
-# Initialize FastAPI app with lifespan
-app = FastAPI(title="Telegram Outlook Bot", lifespan=lifespan)
+@app.on_event("shutdown")
+async def shutdown_event():
+    """Shutdown bot"""
+    global telegram_app
+    
+    try:
+        if telegram_app:
+            await telegram_app.stop()
+            await telegram_app.shutdown()
+            logger.info("Bot shutdown complete")
+    except Exception as e:
+        logger.error(f"Error during shutdown: {e}")
 
 # ==================== ROUTES ====================
 
 @app.get("/")
 async def root():
     """Health check endpoint"""
-    WEBHOOK_URL = os.getenv("RAILWAY_STATIC_URL")
-    return {
-        "status": "online",
-        "service": "Telegram Outlook Bot",
-        "webhook": f"{WEBHOOK_URL}/webhook" if WEBHOOK_URL else "Not set",
-        "connected_users": len(user_tokens)
-    }
+    try:
+        return JSONResponse(
+            status_code=200,
+            content={
+                "status": "online",
+                "service": "Telegram Outlook Bot",
+                "webhook_set": telegram_app is not None
+            }
+        )
+    except Exception as e:
+        logger.error(f"Root endpoint error: {e}")
+        return JSONResponse(
+            status_code=500,
+            content={"status": "error", "message": str(e)}
+        )
 
 @app.get("/health")
 async def health():
-    """Health check"""
-    return {"status": "healthy"}
+    """Simple health check"""
+    return {"status": "ok"}
 
 @app.get("/auth/callback")
 async def auth_callback(code: str = None, state: str = None):
     """Handle Microsoft OAuth callback"""
-    if not code or not state:
-        raise HTTPException(status_code=400, detail="Missing code or state parameter")
-    
-    # Process the auth callback
-    user_id, success = handle_auth_callback(code, state)
-    
-    if success and user_id and telegram_app:
-        # Send confirmation message to user
-        try:
-            await telegram_app.bot.send_message(
-                chat_id=user_id,
-                text="✅ *Outlook Connected Successfully!*\n\n"
-                     "You can now use:\n"
-                     "• /inbox - Read your latest emails\n"
-                     "• /unread - Show unread emails\n\n"
-                     "Happy email reading! 📧",
-                parse_mode='Markdown'
-            )
-            logger.info(f"Sent confirmation to user {user_id}")
-        except Exception as e:
-            logger.error(f"Failed to notify user {user_id}: {e}")
-    
-    # Return success HTML page
-    html_content = """
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <title>Outlook Connected</title>
-        <meta charset="utf-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1">
-        <style>
-            body {
-                font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-                display: flex;
-                justify-content: center;
-                align-items: center;
-                min-height: 100vh;
-                margin: 0;
-                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-                color: white;
-                text-align: center;
-            }
-            .container {
-                background: rgba(255, 255, 255, 0.1);
-                backdrop-filter: blur(10px);
-                padding: 3rem;
-                border-radius: 20px;
-                box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
-                max-width: 500px;
-                width: 90%;
-            }
-            .success-icon {
-                font-size: 4rem;
-                margin-bottom: 1rem;
-            }
-            h1 {
-                font-size: 2.5rem;
-                margin-bottom: 1rem;
-            }
-            p {
-                font-size: 1.2rem;
-                opacity: 0.9;
-                line-height: 1.6;
-                margin-bottom: 2rem;
-            }
-            .button {
-                display: inline-block;
-                padding: 0.8rem 2rem;
-                background: white;
-                color: #667eea;
-                border: none;
-                border-radius: 50px;
-                font-size: 1rem;
-                font-weight: bold;
-                cursor: pointer;
-                text-decoration: none;
-                transition: transform 0.2s;
-            }
-            .button:hover {
-                transform: scale(1.05);
-            }
-        </style>
-    </head>
-    <body>
-        <div class="container">
-            <div class="success-icon">✅</div>
-            <h1>Successfully Connected!</h1>
-            <p>Your Outlook account is now linked with the Telegram bot.</p>
-            <p>You can close this window and return to Telegram.</p>
-            <button class="button" onclick="window.close()">Close Window</button>
-        </div>
-        <script>
-            // Auto-close after 3 seconds
-            setTimeout(() => {
-                window.close();
-            }, 3000);
-        </script>
-    </body>
-    </html>
-    """
-    
-    return HTMLResponse(content=html_content)
+    try:
+        if not code or not state:
+            raise HTTPException(status_code=400, detail="Missing parameters")
+        
+        user_id, success = handle_auth_callback(code, state)
+        
+        if success and user_id and telegram_app:
+            try:
+                await telegram_app.bot.send_message(
+                    chat_id=user_id,
+                    text="✅ Outlook Connected! Use /inbox to read emails."
+                )
+            except Exception as e:
+                logger.error(f"Failed to notify user: {e}")
+        
+        # Simple success page
+        html = """
+        <html>
+            <head><title>Connected</title></head>
+            <body style="text-align: center; padding: 50px;">
+                <h1>✅ Connected!</h1>
+                <p>Return to Telegram</p>
+                <script>setTimeout(() => window.close(), 2000)</script>
+            </body>
+        </html>
+        """
+        return HTMLResponse(content=html)
+        
+    except Exception as e:
+        logger.error(f"Auth callback error: {e}")
+        raise HTTPException(status_code=500, detail="Internal error")
 
 @app.post("/webhook")
 async def telegram_webhook(request: Request):
     """Handle Telegram webhook updates"""
     try:
-        # Parse incoming update
+        if not telegram_app:
+            return JSONResponse(
+                status_code=500,
+                content={"ok": False, "error": "Bot not initialized"}
+            )
+        
         data = await request.json()
         
-        # Process the update using the bot's update processor
         from telegram import Update
         update = Update.de_json(data, telegram_app.bot)
         await telegram_app.process_update(update)
         
-        return JSONResponse(content={"ok": True})
+        return {"ok": True}
+        
     except Exception as e:
         logger.error(f"Webhook error: {e}")
         return JSONResponse(
@@ -198,41 +154,15 @@ async def telegram_webhook(request: Request):
             content={"ok": False, "error": str(e)}
         )
 
-@app.get("/debug")
-async def debug():
-    """Debug endpoint"""
-    WEBHOOK_URL = os.getenv("RAILWAY_STATIC_URL")
-    return {
-        "connected_users": len(user_tokens),
-        "user_ids": list(user_tokens.keys()),
-        "webhook_url": f"{WEBHOOK_URL}/webhook" if WEBHOOK_URL else None,
-        "bot_running": telegram_app is not None
-    }
-
-@app.get("/set-webhook")
-async def set_webhook():
-    """Manually set webhook"""
-    WEBHOOK_URL = os.getenv("RAILWAY_STATIC_URL")
-    if not WEBHOOK_URL or not telegram_app:
-        return {"error": "WEBHOOK_URL not set or bot not initialized"}
-    
-    webhook_url = f"{WEBHOOK_URL}/webhook"
-    result = await telegram_app.bot.set_webhook(webhook_url)
-    
-    return {
-        "success": result,
-        "webhook_url": webhook_url,
-        "bot_username": (await telegram_app.bot.get_me()).username
-    }
-
-# ==================== MAIN ENTRY POINT ====================
+# ==================== MAIN ====================
 
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 8000))
+    logger.info(f"Starting server on port {port}")
     uvicorn.run(
-        "app:app",
+        app,
         host="0.0.0.0",
         port=port,
         reload=False,
-        log_level="info"
+        access_log=True
     )
