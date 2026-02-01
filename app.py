@@ -1,6 +1,7 @@
 import os
 import asyncio
 import logging
+from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse
 import uvicorn
@@ -12,20 +13,15 @@ from telegram_bot import create_application, handle_auth_callback, user_tokens
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Initialize FastAPI app
-app = FastAPI(title="Telegram Outlook Bot")
-
-# Initialize Telegram bot
-TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-WEBHOOK_URL = os.getenv("RAILWAY_STATIC_URL")
-
+# Global variable for Telegram app
 telegram_app = None
 
-@app.on_event("startup")
-async def startup_event():
-    """Initialize bot on startup"""
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Lifespan manager for startup/shutdown events"""
     global telegram_app
     
+    # Startup
     logger.info("Starting Telegram Outlook Bot...")
     
     # Create Telegram application
@@ -36,6 +32,7 @@ async def startup_event():
     await telegram_app.start()
     
     # Set webhook for production
+    WEBHOOK_URL = os.getenv("RAILWAY_STATIC_URL")
     if WEBHOOK_URL:
         webhook_url = f"{WEBHOOK_URL}/webhook"
         await telegram_app.bot.set_webhook(webhook_url)
@@ -44,20 +41,25 @@ async def startup_event():
         logger.warning("WEBHOOK_URL not set, webhook not configured")
     
     logger.info("✅ Bot started successfully!")
-
-@app.on_event("shutdown")
-async def shutdown_event():
-    """Shutdown bot"""
+    
+    yield  # App runs here
+    
+    # Shutdown
+    logger.info("Shutting down Telegram Outlook Bot...")
     if telegram_app:
         await telegram_app.stop()
         await telegram_app.shutdown()
     logger.info("Bot shutdown complete")
+
+# Initialize FastAPI app with lifespan
+app = FastAPI(title="Telegram Outlook Bot", lifespan=lifespan)
 
 # ==================== ROUTES ====================
 
 @app.get("/")
 async def root():
     """Health check endpoint"""
+    WEBHOOK_URL = os.getenv("RAILWAY_STATIC_URL")
     return {
         "status": "online",
         "service": "Telegram Outlook Bot",
@@ -183,8 +185,10 @@ async def telegram_webhook(request: Request):
         # Parse incoming update
         data = await request.json()
         
-        # Process the update
-        update = await telegram_app.update_queue.put(data)
+        # Process the update using the bot's update processor
+        from telegram import Update
+        update = Update.de_json(data, telegram_app.bot)
+        await telegram_app.process_update(update)
         
         return JSONResponse(content={"ok": True})
     except Exception as e:
@@ -197,17 +201,20 @@ async def telegram_webhook(request: Request):
 @app.get("/debug")
 async def debug():
     """Debug endpoint"""
+    WEBHOOK_URL = os.getenv("RAILWAY_STATIC_URL")
     return {
         "connected_users": len(user_tokens),
         "user_ids": list(user_tokens.keys()),
-        "webhook_url": f"{WEBHOOK_URL}/webhook" if WEBHOOK_URL else None
+        "webhook_url": f"{WEBHOOK_URL}/webhook" if WEBHOOK_URL else None,
+        "bot_running": telegram_app is not None
     }
 
 @app.get("/set-webhook")
 async def set_webhook():
     """Manually set webhook"""
-    if not WEBHOOK_URL:
-        return {"error": "WEBHOOK_URL not set"}
+    WEBHOOK_URL = os.getenv("RAILWAY_STATIC_URL")
+    if not WEBHOOK_URL or not telegram_app:
+        return {"error": "WEBHOOK_URL not set or bot not initialized"}
     
     webhook_url = f"{WEBHOOK_URL}/webhook"
     result = await telegram_app.bot.set_webhook(webhook_url)
