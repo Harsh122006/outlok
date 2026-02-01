@@ -1,14 +1,6 @@
-# Core
 flask==3.0.0
 python-telegram-bot==20.6
 requests==2.31.0
-
-# Microsoft/Auth
 msal==1.24.0
 aiohttp==3.9.1
-
-# Async
-asyncio==3.4.3
-
-# Utilities
 python-dotenv==1.0.0
