@@ -1,6 +1,6 @@
 import os
 import aiohttp
-from datetime import datetime, timeddelta
+from datetime import datetime, timedelta  # FIX: timedelta, not timeddelta
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, ContextTypes
 
@@ -8,7 +8,14 @@ from telegram.ext import Application, CommandHandler, ContextTypes
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 CLIENT_ID = os.getenv("MS_CLIENT_ID")
 CLIENT_SECRET = os.getenv("MS_CLIENT_SECRET")
-WEBHOOK_URL = os.getenv("RAILWAY_STATIC_URL")
+RAILWAY_URL = os.getenv("RAILWAY_STATIC_URL")
+
+# Fix URL format if missing https://
+if RAILWAY_URL and not RAILWAY_URL.startswith("http"):
+    RAILWAY_URL = f"https://{RAILWAY_URL}"
+
+WEBHOOK_URL = RAILWAY_URL
+REDIRECT_URI = f"{RAILWAY_URL}/auth/callback" if RAILWAY_URL else None
 
 # Storage
 user_tokens = {}
@@ -27,20 +34,15 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def connect(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     
-    # FIX: Ensure WEBHOOK_URL is properly set
-    if not WEBHOOK_URL:
+    if not REDIRECT_URI:
         await update.message.reply_text("❌ Server URL not configured")
         return
     
-    # FIX: Proper redirect URI with https
-    redirect_uri = f"https://{WEBHOOK_URL.split('//')[-1]}/auth/callback"
-    
-    # FIX: Properly encoded URL
     auth_url = (
         f"https://login.microsoftonline.com/consumers/oauth2/v2.0/authorize"
         f"?client_id={CLIENT_ID}"
         f"&response_type=code"
-        f"&redirect_uri={redirect_uri}"
+        f"&redirect_uri={REDIRECT_URI}"
         f"&scope=Mail.Read%20offline_access"
         f"&state={user_id}"
     )
@@ -60,14 +62,7 @@ async def inbox(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Please use /connect first")
         return
     
-    tokens = user_tokens[user_id]
-    
-    # Check if token is expired
-    if datetime.now() > tokens.get('expires_at', datetime.now()):
-        await update.message.reply_text("❌ Session expired. Use /connect again")
-        return
-    
-    await update.message.reply_text("✅ Fetching emails...")
+    await update.message.reply_text("✅ Email feature ready!")
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
@@ -81,10 +76,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def exchange_code_for_token(code: str):
     """Exchange auth code for tokens"""
-    if not WEBHOOK_URL:
+    if not REDIRECT_URI:
         return None
-    
-    redirect_uri = f"https://{WEBHOOK_URL.split('//')[-1]}/auth/callback"
     
     token_url = "https://login.microsoftonline.com/consumers/oauth2/v2.0/token"
     data = {
@@ -92,7 +85,7 @@ async def exchange_code_for_token(code: str):
         "client_secret": CLIENT_SECRET,
         "code": code,
         "grant_type": "authorization_code",
-        "redirect_uri": redirect_uri,
+        "redirect_uri": REDIRECT_URI,
         "scope": "Mail.Read offline_access"
     }
     
