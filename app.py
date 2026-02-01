@@ -36,6 +36,14 @@ async def startup_event():
             logger.error(f"Missing environment variables: {missing}")
             return
         
+        # Validate RAILWAY_STATIC_URL
+        webhook_url = os.getenv("RAILWAY_STATIC_URL", "")
+        if not webhook_url.startswith("http"):
+            logger.error(f"Invalid RAILWAY_STATIC_URL: {webhook_url}")
+            return
+        
+        logger.info(f"Using webhook URL: {webhook_url}")
+        
         # Create Telegram application
         telegram_app = create_application()
         
@@ -44,11 +52,15 @@ async def startup_event():
         await telegram_app.start()
         
         # Set webhook
-        WEBHOOK_URL = os.getenv("RAILWAY_STATIC_URL")
-        if WEBHOOK_URL:
-            webhook_url = f"{WEBHOOK_URL}/webhook"
-            await telegram_app.bot.set_webhook(webhook_url)
-            logger.info(f"✅ Webhook set to: {webhook_url}")
+        webhook_url = os.getenv("RAILWAY_STATIC_URL")
+        if webhook_url:
+            # Ensure proper webhook URL
+            if not webhook_url.startswith("http"):
+                webhook_url = f"https://{webhook_url}"
+            
+            webhook_endpoint = f"{webhook_url}/webhook"
+            await telegram_app.bot.set_webhook(webhook_endpoint)
+            logger.info(f"✅ Webhook set to: {webhook_endpoint}")
         
         logger.info("✅ Bot started successfully!")
         
@@ -74,12 +86,17 @@ async def shutdown_event():
 async def root():
     """Health check endpoint"""
     try:
+        webhook_url = os.getenv("RAILWAY_STATIC_URL", "")
+        redirect_uri = f"https://{webhook_url.split('//')[-1]}/auth/callback" if webhook_url else "Not set"
+        
         return JSONResponse(
             status_code=200,
             content={
                 "status": "online",
                 "service": "Telegram Outlook Bot",
-                "webhook_set": telegram_app is not None
+                "webhook_url": webhook_url,
+                "redirect_uri": redirect_uri,
+                "bot_running": telegram_app is not None
             }
         )
     except Exception as e:
@@ -115,11 +132,36 @@ async def auth_callback(code: str = None, state: str = None):
         # Simple success page
         html = """
         <html>
-            <head><title>Connected</title></head>
-            <body style="text-align: center; padding: 50px;">
-                <h1>✅ Connected!</h1>
-                <p>Return to Telegram</p>
-                <script>setTimeout(() => window.close(), 2000)</script>
+            <head>
+                <title>Connected</title>
+                <style>
+                    body {
+                        font-family: Arial, sans-serif;
+                        text-align: center;
+                        padding: 50px;
+                        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                        color: white;
+                        min-height: 100vh;
+                        display: flex;
+                        justify-content: center;
+                        align-items: center;
+                        margin: 0;
+                    }
+                    .container {
+                        background: rgba(255, 255, 255, 0.1);
+                        padding: 40px;
+                        border-radius: 20px;
+                        backdrop-filter: blur(10px);
+                    }
+                </style>
+            </head>
+            <body>
+                <div class="container">
+                    <h1 style="font-size: 3em;">✅</h1>
+                    <h1>Outlook Connected!</h1>
+                    <p>You can close this window and return to Telegram.</p>
+                </div>
+                <script>setTimeout(() => window.close(), 3000)</script>
             </body>
         </html>
         """
@@ -153,6 +195,18 @@ async def telegram_webhook(request: Request):
             status_code=500,
             content={"ok": False, "error": str(e)}
         )
+
+@app.get("/debug")
+async def debug():
+    """Debug info"""
+    webhook_url = os.getenv("RAILWAY_STATIC_URL", "")
+    redirect_uri = f"https://{webhook_url.split('//')[-1]}/auth/callback" if webhook_url else "Not set"
+    
+    return {
+        "webhook_url": webhook_url,
+        "redirect_uri": redirect_uri,
+        "bot_running": telegram_app is not None
+    }
 
 # ==================== MAIN ====================
 
