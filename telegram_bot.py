@@ -1,363 +1,237 @@
-import os
-import json
-import asyncio
 import aiohttp
+import logging
 from datetime import datetime, timedelta
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import (
-    ApplicationBuilder,
-    CommandHandler,
-    ContextTypes,
-    CallbackQueryHandler
-)
+from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQueryHandler
 from msal import PublicClientApplication
+import config
 
-# Configuration
-TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-CLIENT_ID = os.getenv("MS_CLIENT_ID")
-CLIENT_SECRET = os.getenv("MS_CLIENT_SECRET")
-REDIRECT_URI = os.getenv("REDIRECT_URI", "http://localhost:8080/auth/callback")
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-# In-memory storage (in production, use a database)
-user_tokens = {}
-auth_requests = {}
-
-# Initialize MSAL app
+# Initialize MSAL
 msal_app = PublicClientApplication(
-    client_id=CLIENT_ID,
+    client_id=config.CLIENT_ID,
     authority="https://login.microsoftonline.com/consumers"
 )
 
-# ==================== TELEGRAM COMMANDS ====================
+# ==================== COMMAND HANDLERS ====================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /start command"""
-    welcome_text = """
-    👋 *Welcome to Outlook Email Reader Bot!*
-
-    I can help you read your Outlook emails directly in Telegram.
-
-    *Available Commands:*
-    /connect - Link your Outlook account
-    /inbox - Read your latest emails
-    /unread - Show unread emails
-    /disconnect - Remove account link
-    /help - Show this help message
-
-    *Privacy:* Your emails are only read when you request them.
-    """
-    await update.message.reply_text(welcome_text, parse_mode='Markdown')
-
-async def connect(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /connect command - Send auth link"""
-    user_id = update.effective_user.id
-    
-    # Generate auth URL
-    auth_url = msal_app.get_authorization_request_url(
-        scopes=["Mail.Read", "offline_access"],
-        redirect_uri=REDIRECT_URI,
-        state=str(user_id)
-    )
-    
-    # Store auth request
-    auth_requests[user_id] = auth_url
-    
-    keyboard = [
-        [InlineKeyboardButton("🔗 Connect Outlook", url=auth_url)],
-        [InlineKeyboardButton("✅ Done Connecting", callback_data="auth_done")]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
     await update.message.reply_text(
-        "📧 *Connect Your Outlook Account*\n\n"
-        "1. Click the button below\n"
-        "2. Login with your Microsoft account\n"
-        "3. Grant 'Read email' permission\n"
-        "4. Click 'Done Connecting' when finished\n\n"
-        "⚠️ *Note:* After authorization, you'll be redirected to a webpage. "
-        "Just close it and return here.",
-        reply_markup=reply_markup,
+        "👋 *Outlook Email Bot*\n\n"
+        "Read your Outlook emails in Telegram!\n\n"
+        "Commands:\n"
+        "/connect - Link Outlook account\n"
+        "/inbox - Read emails\n"
+        "/unread - Show unread\n"
+        "/disconnect - Remove account\n"
+        "/help - Show help",
         parse_mode='Markdown'
     )
 
-async def auth_done_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle auth done callback"""
-    query = update.callback_query
-    await query.answer()
-    
+async def connect(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Generate Outlook auth link"""
     user_id = update.effective_user.id
     
-    if user_id in user_tokens:
-        await query.edit_message_text(
-            "✅ *Already Connected!*\n\n"
-            "Your Outlook account is already linked.\n"
-            "Use /inbox to read your emails.",
-            parse_mode='Markdown'
-        )
-    else:
-        await query.edit_message_text(
-            "🔗 *Authorization Required*\n\n"
-            "Please click the 'Connect Outlook' button first to authorize access.",
-            parse_mode='Markdown'
-        )
+    auth_url = msal_app.get_authorization_request_url(
+        scopes=["Mail.Read", "offline_access"],
+        redirect_uri=config.REDIRECT_URI,
+        state=str(user_id)
+    )
+    
+    keyboard = [[InlineKeyboardButton("🔗 Connect Outlook", url=auth_url)]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await update.message.reply_text(
+        "Click below to connect Outlook:\n"
+        "1. Login with Microsoft\n"
+        "2. Grant 'Read email' permission\n"
+        "3. Return to Telegram",
+        reply_markup=reply_markup
+    )
 
 async def inbox(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /inbox command - Show latest emails"""
+    """Read latest emails"""
     user_id = update.effective_user.id
     
-    if user_id not in user_tokens:
-        await update.message.reply_text(
-            "❌ *Account Not Connected*\n\n"
-            "Please use /connect first to link your Outlook account.",
-            parse_mode='Markdown'
-        )
+    if user_id not in config.user_tokens:
+        await update.message.reply_text("❌ Use /connect first")
         return
     
-    await update.message.reply_text("📬 Fetching your emails...")
+    tokens = config.user_tokens[user_id]
     
-    # Get user tokens
-    tokens = user_tokens[user_id]
-    
-    # Check if token needs refresh
-    if datetime.now() > tokens.get('expires_at', datetime.now()):
-        tokens = await refresh_tokens(tokens['refresh_token'])
-        if tokens:
-            user_tokens[user_id] = tokens
+    # Check token expiry
+    if datetime.now() > tokens['expires_at']:
+        new_tokens = await refresh_token(tokens['refresh_token'])
+        if new_tokens:
+            config.user_tokens[user_id] = new_tokens
+            tokens = new_tokens
         else:
-            await update.message.reply_text(
-                "❌ *Session Expired*\n\n"
-                "Please reconnect with /connect",
-                parse_mode='Markdown'
-            )
+            await update.message.reply_text("❌ Session expired. Use /connect again")
             return
     
     # Fetch emails
     emails = await fetch_emails(tokens['access_token'])
     
     if not emails:
-        await update.message.reply_text(
-            "📭 *No Emails Found*\n\n"
-            "Your inbox is empty or I couldn't fetch emails.",
-            parse_mode='Markdown'
-        )
+        await update.message.reply_text("📭 No emails found")
         return
     
-    # Send emails in chunks (Telegram has message length limits)
-    for i in range(0, len(emails), 3):  # Send 3 emails per message
-        chunk = emails[i:i+3]
-        message = format_emails(chunk, i+1)
-        await update.message.reply_text(message, parse_mode='Markdown')
+    response = "📧 *Your Emails:*\n\n"
+    for i, email in enumerate(emails[:5]):
+        sender = email.get('from', {}).get('emailAddress', {})
+        subject = email.get('subject', 'No Subject')
+        received = email.get('receivedDateTime', '')[:10]
+        
+        response += f"*{i+1}. {subject}*\n"
+        response += f"   👤 {sender.get('name', 'Unknown')}\n"
+        response += f"   📅 {received}\n\n"
+    
+    await update.message.reply_text(response, parse_mode='Markdown')
 
 async def unread(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /unread command - Show unread emails"""
+    """Show unread emails"""
     user_id = update.effective_user.id
     
-    if user_id not in user_tokens:
-        await update.message.reply_text(
-            "❌ *Account Not Connected*\n\n"
-            "Please use /connect first to link your Outlook account.",
-            parse_mode='Markdown'
-        )
+    if user_id not in config.user_tokens:
+        await update.message.reply_text("❌ Use /connect first")
         return
     
-    await update.message.reply_text("📬 Fetching unread emails...")
+    tokens = config.user_tokens[user_id]
     
-    tokens = user_tokens[user_id]
+    if datetime.now() > tokens['expires_at']:
+        new_tokens = await refresh_token(tokens['refresh_token'])
+        if new_tokens:
+            config.user_tokens[user_id] = new_tokens
+            tokens = new_tokens
     
-    # Check token expiry
-    if datetime.now() > tokens.get('expires_at', datetime.now()):
-        tokens = await refresh_tokens(tokens['refresh_token'])
-        if tokens:
-            user_tokens[user_id] = tokens
-    
-    # Fetch unread emails
     emails = await fetch_emails(tokens['access_token'], unread_only=True)
     
     if not emails:
-        await update.message.reply_text(
-            "🎉 *All Caught Up!*\n\n"
-            "You have no unread emails.",
-            parse_mode='Markdown'
-        )
+        await update.message.reply_text("🎉 No unread emails!")
         return
     
-    for i in range(0, len(emails), 3):
-        chunk = emails[i:i+3]
-        message = format_emails(chunk, i+1, unread=True)
-        await update.message.reply_text(message, parse_mode='Markdown')
+    response = "🔵 *Unread Emails:*\n\n"
+    for i, email in enumerate(emails[:5]):
+        sender = email.get('from', {}).get('emailAddress', {})
+        subject = email.get('subject', 'No Subject')
+        
+        response += f"*{i+1}. {subject}*\n"
+        response += f"   👤 {sender.get('name', 'Unknown')}\n\n"
+    
+    await update.message.reply_text(response, parse_mode='Markdown')
 
 async def disconnect(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /disconnect command"""
+    """Remove account"""
     user_id = update.effective_user.id
     
-    if user_id in user_tokens:
-        del user_tokens[user_id]
-        await update.message.reply_text(
-            "✅ *Account Disconnected*\n\n"
-            "Your Outlook account has been unlinked.",
-            parse_mode='Markdown'
-        )
+    if user_id in config.user_tokens:
+        del config.user_tokens[user_id]
+        await update.message.reply_text("✅ Account disconnected")
     else:
-        await update.message.reply_text(
-            "ℹ️ *No Account Linked*\n\n"
-            "You don't have any Outlook account connected.",
-            parse_mode='Markdown'
-        )
+        await update.message.reply_text("ℹ️ No account connected")
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /help command"""
-    help_text = """
-    📋 *Help & Commands*
+    """Show help"""
+    await update.message.reply_text(
+        "📋 *Help*\n\n"
+        "/connect - Link Outlook\n"
+        "/inbox - Read emails\n"
+        "/unread - Unread emails\n"
+        "/disconnect - Remove account\n"
+        "/help - This message",
+        parse_mode='Markdown'
+    )
 
-    *Available Commands:*
-    /start - Welcome message
-    /connect - Link your Outlook account
-    /inbox - Read latest emails (last 10)
-    /unread - Show unread emails
-    /disconnect - Remove account link
-    /help - Show this message
-
-    *How to Connect:*
-    1. Use /connect command
-    2. Click the "Connect Outlook" button
-    3. Login with Microsoft account
-    4. Grant permission to read emails
-    5. Click "Done Connecting"
-
-    *Privacy & Security:*
-    • I only read emails when you ask
-    • No emails are stored permanently
-    • Your tokens are encrypted
-    • Disconnect anytime with /disconnect
-
-    *Need Help?*
-    Make sure you're using a personal Microsoft account.
-    """
-    await update.message.reply_text(help_text, parse_mode='Markdown')
-
-# ==================== MICROSOFT GRAPH API ====================
+# ==================== MICROSOFT GRAPH ====================
 
 async def exchange_code_for_token(code: str):
-    """Exchange auth code for access token"""
+    """Get tokens from auth code"""
     token_url = "https://login.microsoftonline.com/consumers/oauth2/v2.0/token"
     
     data = {
-        "client_id": CLIENT_ID,
-        "client_secret": CLIENT_SECRET,
+        "client_id": config.CLIENT_ID,
+        "client_secret": config.CLIENT_SECRET,
         "code": code,
         "grant_type": "authorization_code",
-        "redirect_uri": REDIRECT_URI,
+        "redirect_uri": config.REDIRECT_URI,
         "scope": "Mail.Read offline_access"
     }
     
     async with aiohttp.ClientSession() as session:
-        async with session.post(token_url, data=data) as response:
-            if response.status == 200:
-                tokens = await response.json()
-                # Add expiry time
+        async with session.post(token_url, data=data) as resp:
+            if resp.status == 200:
+                tokens = await resp.json()
                 tokens['expires_at'] = datetime.now() + timedelta(seconds=tokens.get('expires_in', 3600))
                 return tokens
-            return None
+    return None
 
-async def refresh_tokens(refresh_token: str):
-    """Refresh access token using refresh token"""
+async def refresh_token(refresh_token: str):
+    """Refresh access token"""
     token_url = "https://login.microsoftonline.com/consumers/oauth2/v2.0/token"
     
     data = {
-        "client_id": CLIENT_ID,
-        "client_secret": CLIENT_SECRET,
+        "client_id": config.CLIENT_ID,
+        "client_secret": config.CLIENT_SECRET,
         "refresh_token": refresh_token,
         "grant_type": "refresh_token",
         "scope": "Mail.Read offline_access"
     }
     
     async with aiohttp.ClientSession() as session:
-        async with session.post(token_url, data=data) as response:
-            if response.status == 200:
-                tokens = await response.json()
+        async with session.post(token_url, data=data) as resp:
+            if resp.status == 200:
+                tokens = await resp.json()
                 tokens['expires_at'] = datetime.now() + timedelta(seconds=tokens.get('expires_in', 3600))
                 return tokens
-            return None
+    return None
 
-async def fetch_emails(access_token: str, limit: int = 10, unread_only: bool = False):
-    """Fetch emails from Microsoft Graph API"""
+async def fetch_emails(access_token: str, limit: int = 5, unread_only: bool = False):
+    """Fetch emails from Outlook"""
     graph_url = "https://graph.microsoft.com/v1.0/me/mailFolders/inbox/messages"
     
-    # Build query parameters
     params = {
         "$top": limit,
         "$orderby": "receivedDateTime DESC",
-        "$select": "subject,from,receivedDateTime,hasAttachments,isRead,bodyPreview"
+        "$select": "subject,from,receivedDateTime,isRead"
     }
     
     if unread_only:
         params["$filter"] = "isRead eq false"
     
-    headers = {
-        "Authorization": f"Bearer {access_token}",
-        "Accept": "application/json"
-    }
+    headers = {"Authorization": f"Bearer {access_token}"}
     
     async with aiohttp.ClientSession() as session:
-        async with session.get(graph_url, headers=headers, params=params) as response:
-            if response.status == 200:
-                data = await response.json()
+        async with session.get(graph_url, headers=headers, params=params) as resp:
+            if resp.status == 200:
+                data = await resp.json()
                 return data.get('value', [])
-            return []
-
-def format_emails(emails, start_num: int = 1, unread: bool = False):
-    """Format emails for Telegram display"""
-    if not emails:
-        return "No emails found."
-    
-    title = "📧 *Unread Emails*\n\n" if unread else "📧 *Latest Emails*\n\n"
-    message = title
-    
-    for i, email in enumerate(emails, start=start_num):
-        sender = email.get('from', {}).get('emailAddress', {})
-        sender_name = sender.get('name', 'Unknown')
-        subject = email.get('subject', 'No Subject')
-        received = email.get('receivedDateTime', '')[:19]
-        preview = email.get('bodyPreview', '')[:100]
-        has_attachments = " 📎" if email.get('hasAttachments') else ""
-        is_read = "" if email.get('isRead') else " 🔵"
-        
-        message += f"*{i}. {subject}*{has_attachments}{is_read}\n"
-        message += f"   👤 {sender_name}\n"
-        message += f"   🕐 {received}\n"
-        if preview:
-            message += f"   📝 {preview}...\n"
-        message += "\n"
-    
-    return message
-
-# ==================== AUTH CALLBACK HANDLER ====================
+    return []
 
 def handle_auth_callback(code: str, state: str):
-    """Handle OAuth callback and store tokens"""
+    """Store tokens after OAuth"""
+    import asyncio
+    
     try:
         user_id = int(state)
-        
-        # Exchange code for tokens
-        async def get_tokens():
-            return await exchange_code_for_token(code)
-        
-        tokens = asyncio.run(get_tokens())
+        tokens = asyncio.run(exchange_code_for_token(code))
         
         if tokens:
-            user_tokens[user_id] = tokens
+            config.user_tokens[user_id] = tokens
             return user_id, True
-        return None, False
     except:
-        return None, False
+        pass
+    return None, False
 
-# ==================== BOT APPLICATION ====================
+# ==================== APPLICATION SETUP ====================
 
 def create_application():
-    """Create and configure Telegram application"""
-    app = ApplicationBuilder().token(TOKEN).build()
+    """Create Telegram bot application"""
+    app = Application.builder().token(config.TOKEN).build()
     
-    # Add command handlers
+    # Add handlers
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("connect", connect))
     app.add_handler(CommandHandler("inbox", inbox))
@@ -365,8 +239,4 @@ def create_application():
     app.add_handler(CommandHandler("disconnect", disconnect))
     app.add_handler(CommandHandler("help", help_command))
     
-    # Add callback handler
-    app.add_handler(CallbackQueryHandler(auth_done_callback, pattern="auth_done"))
-    
     return app
-    
