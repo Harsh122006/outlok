@@ -1,0 +1,24 @@
+version: '3.8'
+
+services:
+  outlook-bot:
+    build: .
+    container_name: outlook-email-bot
+    ports:
+      - "8000:8000"
+    environment:
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+      - OUTLOOK_CLIENT_ID=${OUTLOOK_CLIENT_ID}
+      - OUTLOOK_CLIENT_SECRET=${OUTLOOK_CLIENT_SECRET}
+      - OUTLOOK_TENANT_ID=${OUTLOOK_TENANT_ID}
+      - OUTLOOK_REDIRECT_URI=${OUTLOOK_REDIRECT_URI}
+      - DATABASE_URL=${DATABASE_URL}
+    volumes:
+      - ./data:/app/data  # For SQLite database persistence
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import requests; requests.get('http://localhost:8000/health', timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
