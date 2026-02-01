@@ -5,8 +5,7 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY app.py telegram_bot.py ./
+COPY bot.py callback_server.py ./
 
-EXPOSE 8000
-
-CMD ["python", "app.py"]
+# Run both bot and callback server
+CMD bash -c "python callback_server.py & python bot.py"
