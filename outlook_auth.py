@@ -5,8 +5,9 @@ import os
 import secrets
 import hashlib
 import json
+import base64
 from database import Session, User
-import urllib.parse
+from typing import Optional, Dict, Any
 
 class OutlookAuth:
     def __init__(self):
@@ -22,90 +23,125 @@ class OutlookAuth:
             authority=self.authority,
             client_credential=self.client_secret
         )
+        
+        # In-memory cache for auth states (use Redis in production)
+        self.auth_states = {}
     
-    def get_auth_url(self, telegram_id):
-        """Generate UNIQUE Outlook authentication URL"""
-        # Generate unique state with timestamp and random token
-        timestamp = int(datetime.utcnow().timestamp())
-        random_token = secrets.token_urlsafe(16)
+    def get_auth_url(self, telegram_id: str) -> str:
+        """Generate UNIQUE Outlook authentication URL each time"""
+        # Generate unique state
+        state = secrets.token_urlsafe(32)
         
-        # Create state object
-        state_data = {
-            'telegram_id': telegram_id,
-            'timestamp': timestamp,
-            'random': random_token,
-            'nonce': secrets.token_urlsafe(8)
-        }
-        
-        # Convert state to string
-        state_str = json.dumps(state_data)
-        
-        # Generate code verifier and challenge (PKCE)
+        # Generate PKCE code verifier and challenge
         code_verifier = secrets.token_urlsafe(64)
         code_challenge = hashlib.sha256(code_verifier.encode()).digest()
         code_challenge = base64.urlsafe_b64encode(code_challenge).decode().replace('=', '')
         
-        # Store code verifier temporarily (you'll need a cache/store)
-        self.store_code_verifier(telegram_id, code_verifier, state_str)
+        # Store state and code verifier
+        self.auth_states[state] = {
+            'telegram_id': telegram_id,
+            'code_verifier': code_verifier,
+            'created_at': datetime.utcnow(),
+            'used': False
+        }
         
+        # Clean up old states
+        self._clean_old_states()
+        
+        # Generate auth URL with unique parameters
         auth_url = self.app.get_authorization_request_url(
             scopes=self.scopes,
             redirect_uri=self.redirect_uri,
-            state=state_str,
+            state=state,
             code_challenge=code_challenge,
             code_challenge_method='S256'
         )
         
         return auth_url
     
-    def store_code_verifier(self, telegram_id, code_verifier, state):
-        """Store code verifier temporarily (use database or cache)"""
-        session = Session()
+    def _clean_old_states(self):
+        """Remove states older than 10 minutes"""
+        current_time = datetime.utcnow()
+        expired_states = []
         
-        # Update or create user with auth state
-        user = session.query(User).filter_by(telegram_id=telegram_id).first()
-        if not user:
-            user = User(telegram_id=telegram_id)
-            session.add(user)
+        for state, data in self.auth_states.items():
+            if current_time - data['created_at'] > timedelta(minutes=10):
+                expired_states.append(state)
         
-        # Store in a temporary field (you might need to add this to User model)
-        # Or use a separate auth_states table
-        user.auth_state = state
-        user.code_verifier = code_verifier
-        user.auth_requested_at = datetime.utcnow()
-        
-        session.commit()
+        for state in expired_states:
+            del self.auth_states[state]
     
-    def get_token_from_code(self, code, state):
-        """Exchange authorization code for tokens with PKCE"""
+    def get_token_from_code(self, code: str, state: str) -> Optional[Dict[str, Any]]:
+        """Exchange authorization code for tokens"""
         try:
-            # Parse state to get telegram_id
-            state_data = json.loads(state)
-            telegram_id = state_data['telegram_id']
-            
-            # Get stored code verifier
-            session = Session()
-            user = session.query(User).filter_by(telegram_id=telegram_id).first()
-            
-            if not user or not user.code_verifier:
+            # Verify state exists and is valid
+            if state not in self.auth_states:
                 return None
             
+            state_data = self.auth_states[state]
+            
+            # Check if state was already used
+            if state_data['used']:
+                return None
+            
+            # Mark as used
+            self.auth_states[state]['used'] = True
+            
+            # Exchange code for token with PKCE
             result = self.app.acquire_token_by_authorization_code(
                 code,
                 scopes=self.scopes,
                 redirect_uri=self.redirect_uri,
-                code_verifier=user.code_verifier
+                code_verifier=state_data['code_verifier']
             )
             
-            # Clean up code verifier after use
-            user.code_verifier = None
-            user.auth_state = None
-            session.commit()
+            # Remove state after use
+            del self.auth_states[state]
             
             return result
             
         except Exception as e:
-            print(f"Token exchange error: {e}")
+            print(f"❌ Token exchange error: {e}")
             return None
     
-    # ... rest of the methods remain the same
+    def get_user_info(self, access_token: str) -> Dict[str, Any]:
+        """Get user email from Microsoft Graph"""
+        headers = {'Authorization': f'Bearer {access_token}'}
+        try:
+            response = requests.get(
+                'https://graph.microsoft.com/v1.0/me',
+                headers=headers,
+                timeout=10
+            )
+            response.raise_for_status()
+            return response.json()
+        except requests.exceptions.RequestException as e:
+            print(f"❌ Error getting user info: {e}")
+            return {}
+    
+    def refresh_token(self, refresh_token: str) -> Optional[Dict[str, Any]]:
+        """Refresh access token"""
+        try:
+            result = self.app.acquire_token_by_refresh_token(
+                refresh_token,
+                scopes=self.scopes
+            )
+            return result
+        except Exception as e:
+            print(f"❌ Token refresh error: {e}")
+            return None
+    
+    def validate_state(self, state: str, telegram_id: str) -> bool:
+        """Validate if state belongs to user"""
+        if state not in self.auth_states:
+            return False
+        
+        state_data = self.auth_states[state]
+        
+        # Check if state matches telegram_id and not expired
+        if (state_data['telegram_id'] == telegram_id and 
+            not state_data['used'] and
+            datetime.utcnow() - state_data['created_at'] < timedelta(minutes=10)):
+            return True
+        
+        return False
